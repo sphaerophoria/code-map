@@ -12,160 +12,127 @@ fn sendMessage(alloc: Allocator, msg: anytype, writer: anytype) !void {
 }
 
 const IdAllocator = struct {
-    id: i32 = 2,
+    id: i32 = 1,
 
     fn next(self: *IdAllocator) i32 {
-        defer self.id += 1;
+        defer self.id +%= 1;
         return self.id;
     }
 };
 
-const App = struct {
-    const RequestType = enum {
-        initialize,
-        find_references,
-    };
+const LspReferenceRetreiver = struct {
+    process: std.process.Child,
+    id_allocator: IdAllocator,
 
-    alloc: Allocator,
-    outgoing_requests: std.AutoHashMapUnmanaged(i32, RequestType),
-    id_allocator: IdAllocator = .{},
+    pub fn init(alloc: Allocator, argv: []const []const u8, cwd: []const u8) !LspReferenceRetreiver {
+        var process = std.process.Child.init(argv, alloc);
+        process.cwd = cwd;
+        process.stdin_behavior = .Pipe;
+        process.stdout_behavior = .Pipe;
 
-    rx_buf: []u8,
-    tx: std.fs.File,
-    rx: std.fs.File,
-    project_dir: []const u8,
+        var id_allocator = IdAllocator{};
 
-    fn init(alloc: Allocator, rx: std.fs.File, tx: std.fs.File, project_dir: []const u8) !App {
+        try process.spawn();
+        errdefer {
+            _ = process.kill() catch {};
+            _ = process.wait() catch {};
+        }
+
         try sendMessage(alloc, lsp.InitializeMessage{
-            .id = 1,
+            .id = id_allocator.next(),
             .params = .{},
-        }, tx.writer());
+        }, process.stdin.?.writer());
 
-        var outgoing_requests = std.AutoHashMapUnmanaged(i32, RequestType){};
-        errdefer outgoing_requests.deinit(alloc);
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        defer arena.deinit();
 
-        try outgoing_requests.put(alloc, 1, .initialize);
+        const arena_alloc = arena.allocator();
+        _ = try waitResponseLeaky(lsp.ResponseMessage, arena_alloc, process.stdout.?);
 
-        const rx_buf = try alloc.alloc(u8, 1 << 20);
+        try sendMessage(alloc, lsp.InitializedNotification{
+            .method = "initialized",
+            .params = .{},
+        }, process.stdin.?.writer());
+
         return .{
-            .alloc = alloc,
-            .outgoing_requests = outgoing_requests,
-            .tx = tx,
-            .rx = rx,
-            .rx_buf = rx_buf,
-            .project_dir = project_dir,
+            .process = process,
+            .id_allocator = id_allocator,
         };
     }
 
-    fn deinit(self: *App) void {
-        self.outgoing_requests.deinit(self.alloc);
-        self.alloc.free(self.rx_buf);
+    pub fn deinit(self: *LspReferenceRetreiver) void {
+        _ = self.process.kill() catch return;
+        _ = self.process.wait() catch return;
     }
 
-    fn step(self: *App) !void {
-        const read_len = try self.rx.read(self.rx_buf);
-        if (read_len == 0) return;
+    pub fn findReferencesLeaky(
+        self: *LspReferenceRetreiver,
+        alloc: Allocator,
+        abs_path: []const u8,
+        line: u32,
+        col: u32,
+    ) ![]lsp.Location {
+        const uri = try std.fmt.allocPrint(alloc, "file://{s}", .{abs_path});
+        defer alloc.free(uri);
 
-        const message = self.rx_buf[0..read_len];
+        const f = try std.fs.openFileAbsolute(abs_path, .{});
+        defer f.close();
 
-        // FIXME: Multiple messages will break this
-        const header_end = std.mem.indexOf(u8, message, "\r\n\r\n") orelse return;
-        const json_start = header_end + 4;
+        const content = try f.readToEndAlloc(alloc, 1 << 20);
+        defer alloc.free(content);
 
-        const partial_resposne = try std.json.parseFromSlice(lsp.ResponseMessage, self.alloc, message[json_start..], .{ .ignore_unknown_fields = true });
-        defer partial_resposne.deinit();
+        const writer = self.process.stdin.?.writer();
 
-        std.debug.print("got response for {d}\n", .{partial_resposne.value.id});
-        const expected_response_type = self.outgoing_requests.get(partial_resposne.value.id) orelse return;
-        switch (expected_response_type) {
-            .initialize => {
-                std.debug.print("Initialized baybeee\n", .{});
-                try sendMessage(self.alloc, lsp.InitializedNotification{
-                    .method = "initialized",
-                    .params = .{},
-                }, self.tx.writer());
-
-                const main_path = try std.fmt.allocPrint(self.alloc, "{s}/src/main.zig", .{self.project_dir});
-                defer self.alloc.free(main_path);
-
-                const main_uri = try std.fmt.allocPrint(self.alloc, "file://{s}/src/main.zig", .{self.project_dir});
-                defer self.alloc.free(main_uri);
-
-                const main_zig_f = try std.fs.openFileAbsolute(main_path, .{});
-                defer main_zig_f.close();
-                const main_zig_content = try main_zig_f.readToEndAlloc(self.alloc, 1 << 20);
-                defer self.alloc.free(main_zig_content);
-
-                try sendMessage(self.alloc, lsp.DidOpenNotification{
-                    .params = .{
-                        .textDocument = .{
-                            .uri = main_uri,
-                            .languageId = "zig",
-                            .version = 1,
-                            .text = main_zig_content,
-                        },
-                    },
-                }, self.tx.writer());
-
-                const id = self.id_allocator.next();
-                try self.outgoing_requests.put(self.alloc, id, .find_references);
-                try sendMessage(self.alloc, lsp.FindReferences{
-                    .id = id,
-                    .params = .{
-                        .textDocument = .{
-                            .uri = main_uri,
-                        },
-                        .position = .{
-                            .line = 19,
-                            .character = 8,
-                        },
-                        .context = .{
-                            .includeDeclaration = false,
-                        },
-                    },
-                }, self.tx.writer());
-
-                const id2 = self.id_allocator.next();
-                try self.outgoing_requests.put(self.alloc, id2, .find_references);
-                try sendMessage(self.alloc, lsp.FindReferences{
-                    .id = id2,
-                    .params = .{
-                        .textDocument = .{
-                            .uri = main_uri,
-                        },
-                        .position = .{
-                            .line = 1182,
-                            .character = 22,
-                        },
-                        .context = .{
-                            .includeDeclaration = false,
-                        },
-                    },
-                }, self.tx.writer());
+        // FIXME: Close
+        try sendMessage(alloc, lsp.DidOpenNotification{
+            .params = .{
+                .textDocument = .{
+                    .uri = uri,
+                    .languageId = "zig",
+                    .version = 1,
+                    .text = content,
+                },
             },
-            .find_references => {
-                std.debug.print("Find references response time now\n", .{});
-                const response = try std.json.parseFromSlice(lsp.FindReferencesResponse, self.alloc, message[json_start..], .{ .ignore_unknown_fields = true });
-                defer response.deinit();
-                std.debug.print("result: {any}", .{response.value.result});
-                if (response.value.result == null) return error.NoResults;
-                for (response.value.result.?) |loc| {
-                    std.debug.print("{s}, ({d},{d})\n", .{ loc.uri, loc.range.start.line, loc.range.start.character });
-                }
+        }, writer);
+
+        const id = self.id_allocator.next();
+        try sendMessage(alloc, lsp.FindReferences{
+            .id = id,
+            .params = .{
+                .textDocument = .{
+                    .uri = uri,
+                },
+                .position = .{
+                    .line = line,
+                    .character = col,
+                },
+                .context = .{
+                    .includeDeclaration = false,
+                },
             },
-        }
+        }, writer);
+
+        const response = try waitResponseLeaky(lsp.FindReferencesResponse, alloc, self.process.stdout.?);
+        return response.result orelse return error.NoReferences;
     }
 
-    fn run(self: *App) !void {
-        while (true) {
-            try self.step();
-
-            // FIXME: Proper poll on file handle
+    fn waitResponseLeaky(comptime Response: type, alloc: Allocator, rx: std.fs.File) !Response {
+        var read_len: usize = 0;
+        const rx_buf = try alloc.alloc(u8, 1 << 20);
+        while (read_len == 0) {
+            read_len = try rx.read(rx_buf);
+            // FIXME: poll
             std.time.sleep(50 * std.time.ns_per_ms);
         }
+
+        const message = rx_buf[0..read_len];
+        // FIXME: Multiple messages will break this
+        const header_end = std.mem.indexOf(u8, message, "\r\n\r\n") orelse return error.NoHeaderEnd;
+        const json_start = header_end + 4;
+
+        return try std.json.parseFromSliceLeaky(Response, alloc, message[json_start..], .{ .ignore_unknown_fields = true });
     }
 };
-
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -177,20 +144,24 @@ pub fn main() !void {
     defer std.process.argsFree(alloc, args);
 
     const project_dir = args[1];
+    const file = args[2];
+    const line = try std.fmt.parseInt(u32, args[3], 0);
+    const col = try std.fmt.parseInt(u32, args[4], 0);
+
     const abs_project_dir = try std.fs.cwd().realpathAlloc(alloc, project_dir);
     defer alloc.free(abs_project_dir);
 
-    var process = std.process.Child.init(&.{"zls"}, alloc);
-    process.cwd = project_dir;
-    process.stdin_behavior = .Pipe;
-    process.stdout_behavior = .Pipe;
+    var retriever = try LspReferenceRetreiver.init(alloc, &.{"zls"}, abs_project_dir);
+    defer retriever.deinit();
 
-    try process.spawn();
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
 
-    var app = try App.init(alloc, process.stdout.?, process.stdin.?, abs_project_dir);
-    defer app.deinit();
-    try app.run();
+    const abs_file = try std.fs.cwd().realpathAlloc(alloc, file);
+    defer alloc.free(abs_file);
 
-    _ = try process.kill();
-    _ = try process.wait();
+    const references = try retriever.findReferencesLeaky(arena.allocator(), abs_file, line, col);
+    for (references) |loc| {
+        std.debug.print("ref: {s} ({d}, {d})\n", .{loc.uri, loc.range.start.line, loc.range.start.character});
+    }
 }
