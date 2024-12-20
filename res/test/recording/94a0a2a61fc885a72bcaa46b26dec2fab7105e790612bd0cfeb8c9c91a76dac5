@@ -1,0 +1,19 @@
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": [
+    {
+      "uri": "file:///tmp/tmpgsnp14vp/data/src/main.zig",
+      "range": {
+        "start": {
+          "line": 14,
+          "character": 14
+        },
+        "end": {
+          "line": 14,
+          "character": 21
+        }
+      }
+    }
+  ]
+}

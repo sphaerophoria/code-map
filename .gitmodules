@@ -1,0 +1,3 @@
+[submodule "zls"]
+	path = zls
+	url = ../zls

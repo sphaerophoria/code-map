@@ -1,0 +1,73 @@
+{
+	"language_server": ["zls/zig-out/bin/zls"],
+	"language_id": "zig",
+	"language_server_progress_token": "buildProgressToken",
+	"blacklist_paths": [".zig-cache"],
+	"treesitter_so": "zig-out/lib/libtreesitter_zig.so",
+	"treesitter_init": "tree_sitter_zig",
+	"treesitter_ruleset": {
+	  "ident_resolvers": [
+	    [
+	      {
+		"goto_parent": {}
+	      },
+	      {
+		"expect_type": "variable_declaration"
+	      },
+	      {
+		"first_child_with_type": "identifier"
+	      }
+	    ],
+	    [
+	      {
+		"goto_parent": {}
+	      },
+	      {
+		"expect_type": "container_field"
+	      },
+	      {
+		"first_child_with_type": "identifier"
+	      }
+	    ],
+	    [
+	      {
+		"first_child_with_type": "identifier"
+	      }
+	    ]
+	  ],
+	  "rules": [
+	    {
+	      "match_type": "struct_declaration",
+	      "print_name": "struct",
+	      "resolve_ident": [
+		0,
+		1
+	      ]
+	    },
+	    {
+	      "match_type": "union_declaration",
+	      "print_name": "union",
+	      "resolve_ident": [
+		0,
+		1
+	      ]
+	    },
+	    {
+	      "match_type": "enum_declaration",
+	      "print_name": "enum",
+	      "resolve_ident": [
+		0,
+		1
+	      ]
+	    },
+	    {
+	      "match_type": "function_declaration",
+	      "print_name": "function",
+	      "resolve_ident": [
+		2
+	      ]
+	    }
+	  ]
+	},
+	"matched_extension": ".zig"
+}

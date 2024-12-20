@@ -1,0 +1,32 @@
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "result": [
+    {
+      "uri": "file:///tmp/tmpgsnp14vp/data/src/libA/a.zig",
+      "range": {
+        "start": {
+          "line": 15,
+          "character": 15
+        },
+        "end": {
+          "line": 15,
+          "character": 26
+        }
+      }
+    },
+    {
+      "uri": "file:///tmp/tmpgsnp14vp/data/src/main.zig",
+      "range": {
+        "start": {
+          "line": 11,
+          "character": 6
+        },
+        "end": {
+          "line": 11,
+          "character": 17
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+.{
+    .name = "code-map",
+    .version = "0.0.1",
+    .minimum_zig_version = "0.13.0",
+    .dependencies = .{
+        .treesitter = .{
+            .url = "https://github.com/tree-sitter/tree-sitter/archive/refs/tags/v0.24.5.tar.gz",
+            .hash = "122012cec0cb9dd9718969ee97fb9a269c86962ce3ec2a0a35fd58f5e87c8e587c2f",
+        },
+        .treesitter_zig = .{
+            .url = "https://github.com/tree-sitter-grammars/tree-sitter-zig/archive/refs/tags/v1.1.2.tar.gz",
+            .hash = "122099c4b527a9ee3adb43ff16a1eb118f0f1d3035f9594e9f8c97d3426f9a60fb1f",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

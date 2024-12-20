@@ -1,0 +1,266 @@
+{
+  "jsonrpc": "2.0",
+  "id": 12,
+  "result": [
+    {
+      "uri": "file:///nix/store/v9xybfsc2iyfd602s192pymyrrncni0n-zig-0.13.0/lib/zig/std/start.zig",
+      "range": {
+        "start": {
+          "line": 35,
+          "character": 43
+        },
+        "end": {
+          "line": 35,
+          "character": 47
+        }
+      }
+    },
+    {
+      "uri": "file:///nix/store/v9xybfsc2iyfd602s192pymyrrncni0n-zig-0.13.0/lib/zig/std/start.zig",
+      "range": {
+        "start": {
+          "line": 64,
+          "character": 50
+        },
+        "end": {
+          "line": 64,
+          "character": 54
+        }
+      }
+    },
+    {
+      "uri": "file:///nix/store/v9xybfsc2iyfd602s192pymyrrncni0n-zig-0.13.0/lib/zig/std/start.zig",
+      "range": {
+        "start": {
+          "line": 107,
+          "character": 9
+        },
+        "end": {
+          "line": 107,
+          "character": 13
+        }
+      }
+    },
+    {
+      "uri": "file:///nix/store/v9xybfsc2iyfd602s192pymyrrncni0n-zig-0.13.0/lib/zig/std/start.zig",
+      "range": {
+        "start": {
+          "line": 117,
+          "character": 9
+        },
+        "end": {
+          "line": 117,
+          "character": 13
+        }
+      }
+    },
+    {
+      "uri": "file:///nix/store/v9xybfsc2iyfd602s192pymyrrncni0n-zig-0.13.0/lib/zig/std/start.zig",
+      "range": {
+        "start": {
+          "line": 122,
+          "character": 9
+        },
+        "end": {
+          "line": 122,
+          "character": 13
+        }
+      }
+    },
+    {
+      "uri": "file:///nix/store/v9xybfsc2iyfd602s192pymyrrncni0n-zig-0.13.0/lib/zig/std/start.zig",
+      "range": {
+        "start": {
+          "line": 126,
+          "character": 9
+        },
+        "end": {
+          "line": 126,
+          "character": 13
+        }
+      }
+    },
+    {
+      "uri": "file:///nix/store/v9xybfsc2iyfd602s192pymyrrncni0n-zig-0.13.0/lib/zig/std/start.zig",
+      "range": {
+        "start": {
+          "line": 211,
+          "character": 62
+        },
+        "end": {
+          "line": 211,
+          "character": 66
+        }
+      }
+    },
+    {
+      "uri": "file:///nix/store/v9xybfsc2iyfd602s192pymyrrncni0n-zig-0.13.0/lib/zig/std/start.zig",
+      "range": {
+        "start": {
+          "line": 212,
+          "character": 26
+        },
+        "end": {
+          "line": 212,
+          "character": 30
+        }
+      }
+    },
+    {
+      "uri": "file:///nix/store/v9xybfsc2iyfd602s192pymyrrncni0n-zig-0.13.0/lib/zig/std/start.zig",
+      "range": {
+        "start": {
+          "line": 214,
+          "character": 17
+        },
+        "end": {
+          "line": 214,
+          "character": 21
+        }
+      }
+    },
+    {
+      "uri": "file:///nix/store/v9xybfsc2iyfd602s192pymyrrncni0n-zig-0.13.0/lib/zig/std/start.zig",
+      "range": {
+        "start": {
+          "line": 221,
+          "character": 28
+        },
+        "end": {
+          "line": 221,
+          "character": 32
+        }
+      }
+    },
+    {
+      "uri": "file:///nix/store/v9xybfsc2iyfd602s192pymyrrncni0n-zig-0.13.0/lib/zig/std/start.zig",
+      "range": {
+        "start": {
+          "line": 231,
+          "character": 35
+        },
+        "end": {
+          "line": 231,
+          "character": 39
+        }
+      }
+    },
+    {
+      "uri": "file:///nix/store/v9xybfsc2iyfd602s192pymyrrncni0n-zig-0.13.0/lib/zig/std/start.zig",
+      "range": {
+        "start": {
+          "line": 233,
+          "character": 17
+        },
+        "end": {
+          "line": 233,
+          "character": 21
+        }
+      }
+    },
+    {
+      "uri": "file:///nix/store/v9xybfsc2iyfd602s192pymyrrncni0n-zig-0.13.0/lib/zig/std/start.zig",
+      "range": {
+        "start": {
+          "line": 236,
+          "character": 17
+        },
+        "end": {
+          "line": 236,
+          "character": 21
+        }
+      }
+    },
+    {
+      "uri": "file:///nix/store/v9xybfsc2iyfd602s192pymyrrncni0n-zig-0.13.0/lib/zig/std/start.zig",
+      "range": {
+        "start": {
+          "line": 240,
+          "character": 24
+        },
+        "end": {
+          "line": 240,
+          "character": 28
+        }
+      }
+    },
+    {
+      "uri": "file:///nix/store/v9xybfsc2iyfd602s192pymyrrncni0n-zig-0.13.0/lib/zig/std/start.zig",
+      "range": {
+        "start": {
+          "line": 243,
+          "character": 37
+        },
+        "end": {
+          "line": 243,
+          "character": 41
+        }
+      }
+    },
+    {
+      "uri": "file:///nix/store/v9xybfsc2iyfd602s192pymyrrncni0n-zig-0.13.0/lib/zig/std/start.zig",
+      "range": {
+        "start": {
+          "line": 508,
+          "character": 45
+        },
+        "end": {
+          "line": 508,
+          "character": 49
+        }
+      }
+    },
+    {
+      "uri": "file:///nix/store/v9xybfsc2iyfd602s192pymyrrncni0n-zig-0.13.0/lib/zig/std/start.zig",
+      "range": {
+        "start": {
+          "line": 510,
+          "character": 17
+        },
+        "end": {
+          "line": 510,
+          "character": 21
+        }
+      }
+    },
+    {
+      "uri": "file:///nix/store/v9xybfsc2iyfd602s192pymyrrncni0n-zig-0.13.0/lib/zig/std/start.zig",
+      "range": {
+        "start": {
+          "line": 513,
+          "character": 17
+        },
+        "end": {
+          "line": 513,
+          "character": 21
+        }
+      }
+    },
+    {
+      "uri": "file:///nix/store/v9xybfsc2iyfd602s192pymyrrncni0n-zig-0.13.0/lib/zig/std/start.zig",
+      "range": {
+        "start": {
+          "line": 520,
+          "character": 24
+        },
+        "end": {
+          "line": 520,
+          "character": 28
+        }
+      }
+    },
+    {
+      "uri": "file:///nix/store/v9xybfsc2iyfd602s192pymyrrncni0n-zig-0.13.0/lib/zig/std/start.zig",
+      "range": {
+        "start": {
+          "line": 523,
+          "character": 32
+        },
+        "end": {
+          "line": 523,
+          "character": 36
+        }
+      }
+    }
+  ]
+}

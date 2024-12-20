@@ -1,0 +1,71 @@
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "result": [
+    {
+      "uri": "file:///tmp/tmpgsnp14vp/data/src/libA/a.zig",
+      "range": {
+        "start": {
+          "line": 4,
+          "character": 7
+        },
+        "end": {
+          "line": 4,
+          "character": 16
+        }
+      }
+    },
+    {
+      "uri": "file:///tmp/tmpgsnp14vp/data/src/libA/a.zig",
+      "range": {
+        "start": {
+          "line": 10,
+          "character": 17
+        },
+        "end": {
+          "line": 10,
+          "character": 26
+        }
+      }
+    },
+    {
+      "uri": "file:///tmp/tmpgsnp14vp/data/src/libA/a.zig",
+      "range": {
+        "start": {
+          "line": 23,
+          "character": 26
+        },
+        "end": {
+          "line": 23,
+          "character": 35
+        }
+      }
+    },
+    {
+      "uri": "file:///tmp/tmpgsnp14vp/data/src/libA/a.zig",
+      "range": {
+        "start": {
+          "line": 37,
+          "character": 14
+        },
+        "end": {
+          "line": 37,
+          "character": 23
+        }
+      }
+    },
+    {
+      "uri": "file:///tmp/tmpgsnp14vp/data/src/main.zig",
+      "range": {
+        "start": {
+          "line": 10,
+          "character": 20
+        },
+        "end": {
+          "line": 10,
+          "character": 29
+        }
+      }
+    }
+  ]
+}
