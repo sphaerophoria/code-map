@@ -1,109 +1,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-
-const Message = struct {
-    jsonrpc: []const u8 = "2.0",
-};
-
-pub fn PatchStructMany(comptime Base: type, comptime Children: []const type) type {
-    const base_info = @typeInfo(Base);
-
-    var fields: []const std.builtin.Type.StructField = base_info.Struct.fields;
-
-    inline for (Children) |Child| {
-        const child_info = @typeInfo(Child);
-        fields = fields ++ child_info.Struct.fields;
-    }
-    return @Type(.{ .Struct = .{
-        .layout = .auto,
-        .fields = fields,
-        .decls = &.{},
-        .is_tuple = false,
-    } });
-}
-
-pub fn PatchStruct(comptime Base: type, comptime Child: type) type {
-    return PatchStructMany(Base, &.{Child});
-}
-
-const RequestMessage = PatchStruct(Message, struct {
-    id: i32,
-});
-
-const ResponseMessage = PatchStruct(Message, struct {
-    id: i32,
-});
-
-const InitializedNotification = PatchStruct(Message, struct {
-    method: []const u8 = "initialized",
-    params: struct {},
-});
-
-const InitializeMessage = PatchStruct(RequestMessage, struct {
-    method: []const u8 = "initialize",
-    params: struct {
-        capabilities: struct {
-            textDocument: struct {
-                references: struct {
-                    dynamicRegistration: bool = false,
-                } = .{},
-            } = .{},
-        } = .{},
-    },
-});
-
-const TextDocumentIdentifier = struct {
-    uri: []const u8,
-};
-
-const Position = struct {
-    line: u32,
-    character: u32,
-};
-
-const TextDocumentPositionParams = struct {
-    textDocument: TextDocumentIdentifier,
-    position: Position,
-};
-
-const ReferenceParams = PatchStruct(TextDocumentPositionParams, struct {
-    context: struct {
-        includeDeclaration: bool,
-    },
-});
-
-const FindReferences = PatchStruct(RequestMessage, struct {
-    method: []const u8 = "textDocument/references",
-    params: ReferenceParams,
-});
-
-const Range = struct {
-    start: Position,
-    end: Position,
-};
-
-const Location = struct {
-    uri: []const u8,
-    range: Range,
-};
-
-const FindReferencesResponse = PatchStruct(ResponseMessage, struct {
-    result: ?[]Location,
-});
-
-const DidOpen = PatchStruct(Message, struct {
-    method: []const u8 = "textDocument/didOpen",
-    params: struct {
-        textDocument: TextDocumentItem,
-    },
-});
-
-const TextDocumentItem = struct {
-    uri: []const u8,
-    languageId: []const u8,
-    version: i32,
-    text: []const u8,
-};
+const meta = @import("meta.zig");
+const PatchStruct = meta.PatchStruct;
+const lsp = @import("lsp.zig");
 
 fn sendMessage(alloc: Allocator, msg: anytype, writer: anytype) !void {
     const msg_serialized = try std.json.stringifyAlloc(alloc, msg, .{});
@@ -137,9 +36,8 @@ const App = struct {
     project_dir: []const u8,
 
     fn init(alloc: Allocator, rx: std.fs.File, tx: std.fs.File, project_dir: []const u8) !App {
-        try sendMessage(alloc, InitializeMessage{
+        try sendMessage(alloc, lsp.InitializeMessage{
             .id = 1,
-            .method = "initialize",
             .params = .{},
         }, tx.writer());
 
@@ -174,7 +72,7 @@ const App = struct {
         const header_end = std.mem.indexOf(u8, message, "\r\n\r\n") orelse return;
         const json_start = header_end + 4;
 
-        const partial_resposne = try std.json.parseFromSlice(ResponseMessage, self.alloc, message[json_start..], .{ .ignore_unknown_fields = true });
+        const partial_resposne = try std.json.parseFromSlice(lsp.ResponseMessage, self.alloc, message[json_start..], .{ .ignore_unknown_fields = true });
         defer partial_resposne.deinit();
 
         std.debug.print("got response for {d}\n", .{partial_resposne.value.id});
@@ -182,7 +80,7 @@ const App = struct {
         switch (expected_response_type) {
             .initialize => {
                 std.debug.print("Initialized baybeee\n", .{});
-                try sendMessage(self.alloc, InitializedNotification{
+                try sendMessage(self.alloc, lsp.InitializedNotification{
                     .method = "initialized",
                     .params = .{},
                 }, self.tx.writer());
@@ -198,7 +96,7 @@ const App = struct {
                 const main_zig_content = try main_zig_f.readToEndAlloc(self.alloc, 1 << 20);
                 defer self.alloc.free(main_zig_content);
 
-                try sendMessage(self.alloc, DidOpen{
+                try sendMessage(self.alloc, lsp.DidOpenNotification{
                     .params = .{
                         .textDocument = .{
                             .uri = main_uri,
@@ -211,7 +109,7 @@ const App = struct {
 
                 const id = self.id_allocator.next();
                 try self.outgoing_requests.put(self.alloc, id, .find_references);
-                try sendMessage(self.alloc, FindReferences{
+                try sendMessage(self.alloc, lsp.FindReferences{
                     .id = id,
                     .params = .{
                         .textDocument = .{
@@ -229,7 +127,7 @@ const App = struct {
 
                 const id2 = self.id_allocator.next();
                 try self.outgoing_requests.put(self.alloc, id2, .find_references);
-                try sendMessage(self.alloc, FindReferences{
+                try sendMessage(self.alloc, lsp.FindReferences{
                     .id = id2,
                     .params = .{
                         .textDocument = .{
@@ -247,7 +145,7 @@ const App = struct {
             },
             .find_references => {
                 std.debug.print("Find references response time now\n", .{});
-                const response = try std.json.parseFromSlice(FindReferencesResponse, self.alloc, message[json_start..], .{ .ignore_unknown_fields = true });
+                const response = try std.json.parseFromSlice(lsp.FindReferencesResponse, self.alloc, message[json_start..], .{ .ignore_unknown_fields = true });
                 defer response.deinit();
                 std.debug.print("result: {any}", .{response.value.result});
                 if (response.value.result == null) return error.NoResults;
@@ -267,6 +165,7 @@ const App = struct {
         }
     }
 };
+
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
