@@ -1,0 +1,3 @@
+[submodule "sphimp"]
+	path = sphimp
+	url = ../sphimp
