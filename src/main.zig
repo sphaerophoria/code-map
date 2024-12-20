@@ -2,10 +2,10 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const Message = struct {
-    jsonrpc: []const u8,
+    jsonrpc: []const u8 = "2.0",
 };
 
-pub fn ExtendMessage(comptime Base: type, comptime Children: []const type) type {
+pub fn PatchStructMany(comptime Base: type, comptime Children: []const type) type {
     const base_info = @typeInfo(Base);
 
     var fields: []const std.builtin.Type.StructField = base_info.Struct.fields;
@@ -22,24 +22,25 @@ pub fn ExtendMessage(comptime Base: type, comptime Children: []const type) type 
     } });
 }
 
-const RequestMessage = ExtendMessage(Message, &.{struct {
+pub fn PatchStruct(comptime Base: type, comptime Child: type) type {
+    return PatchStructMany(Base, &.{Child});
+}
+
+const RequestMessage = PatchStruct(Message, struct {
     id: i32,
-    method: []const u8,
-}});
+});
 
-const PartialResponseMessage = ExtendMessage(Message, &.{struct {
+const ResponseMessage = PatchStruct(Message, struct {
     id: i32,
-}});
+});
 
-const Notification = ExtendMessage(Message, &.{struct {
-    method: []const u8,
-}});
-
-const InitializedNotification = ExtendMessage(Notification, &.{struct {
+const InitializedNotification = PatchStruct(Message, struct {
+    method: []const u8 = "initialized",
     params: struct {},
-}});
+});
 
-const InitializeMessage = ExtendMessage(RequestMessage, &.{struct {
+const InitializeMessage = PatchStruct(RequestMessage, struct {
+    method: []const u8 = "initialize",
     params: struct {
         capabilities: struct {
             textDocument: struct {
@@ -49,7 +50,7 @@ const InitializeMessage = ExtendMessage(RequestMessage, &.{struct {
             } = .{},
         } = .{},
     },
-}});
+});
 
 const TextDocumentIdentifier = struct {
     uri: []const u8,
@@ -65,15 +66,16 @@ const TextDocumentPositionParams = struct {
     position: Position,
 };
 
-const ReferenceParams = ExtendMessage(TextDocumentPositionParams, &.{struct {
+const ReferenceParams = PatchStruct(TextDocumentPositionParams, struct {
     context: struct {
         includeDeclaration: bool,
     },
-}});
+});
 
-const FindReferences = ExtendMessage(RequestMessage, &.{struct {
+const FindReferences = PatchStruct(RequestMessage, struct {
+    method: []const u8 = "textDocument/references",
     params: ReferenceParams,
-}});
+});
 
 const Range = struct {
     start: Position,
@@ -85,13 +87,16 @@ const Location = struct {
     range: Range,
 };
 
-const FindReferencesResponse = ExtendMessage(PartialResponseMessage, &.{struct {
+const FindReferencesResponse = PatchStruct(ResponseMessage, struct {
     result: ?[]Location,
-}});
+});
 
-const DidOpen = ExtendMessage(Notification, &.{struct { params: struct {
-    textDocument: TextDocumentItem,
-} }});
+const DidOpen = PatchStruct(Message, struct {
+    method: []const u8 = "textDocument/didOpen",
+    params: struct {
+        textDocument: TextDocumentItem,
+    },
+});
 
 const TextDocumentItem = struct {
     uri: []const u8,
@@ -115,6 +120,7 @@ const IdAllocator = struct {
         return self.id;
     }
 };
+
 const App = struct {
     const RequestType = enum {
         initialize,
@@ -128,10 +134,10 @@ const App = struct {
     rx_buf: []u8,
     tx: std.fs.File,
     rx: std.fs.File,
+    project_dir: []const u8,
 
-    fn init(alloc: Allocator, rx: std.fs.File, tx: std.fs.File) !App {
+    fn init(alloc: Allocator, rx: std.fs.File, tx: std.fs.File, project_dir: []const u8) !App {
         try sendMessage(alloc, InitializeMessage{
-            .jsonrpc = "2.0",
             .id = 1,
             .method = "initialize",
             .params = .{},
@@ -149,7 +155,13 @@ const App = struct {
             .tx = tx,
             .rx = rx,
             .rx_buf = rx_buf,
+            .project_dir = project_dir,
         };
+    }
+
+    fn deinit(self: *App) void {
+        self.outgoing_requests.deinit(self.alloc);
+        self.alloc.free(self.rx_buf);
     }
 
     fn step(self: *App) !void {
@@ -162,7 +174,7 @@ const App = struct {
         const header_end = std.mem.indexOf(u8, message, "\r\n\r\n") orelse return;
         const json_start = header_end + 4;
 
-        const partial_resposne = try std.json.parseFromSlice(PartialResponseMessage, self.alloc, message[json_start..], .{ .ignore_unknown_fields = true });
+        const partial_resposne = try std.json.parseFromSlice(ResponseMessage, self.alloc, message[json_start..], .{ .ignore_unknown_fields = true });
         defer partial_resposne.deinit();
 
         std.debug.print("got response for {d}\n", .{partial_resposne.value.id});
@@ -171,22 +183,25 @@ const App = struct {
             .initialize => {
                 std.debug.print("Initialized baybeee\n", .{});
                 try sendMessage(self.alloc, InitializedNotification{
-                    .jsonrpc = "2.0",
                     .method = "initialized",
                     .params = .{},
                 }, self.tx.writer());
 
-                const main_zig_f = try std.fs.openFileAbsolute("/home/streamer/work/sphimage-editor/src/main.zig", .{});
+                const main_path = try std.fmt.allocPrint(self.alloc, "{s}/src/main.zig", .{self.project_dir});
+                defer self.alloc.free(main_path);
+
+                const main_uri = try std.fmt.allocPrint(self.alloc, "file://{s}/src/main.zig", .{self.project_dir});
+                defer self.alloc.free(main_uri);
+
+                const main_zig_f = try std.fs.openFileAbsolute(main_path, .{});
                 defer main_zig_f.close();
                 const main_zig_content = try main_zig_f.readToEndAlloc(self.alloc, 1 << 20);
                 defer self.alloc.free(main_zig_content);
 
                 try sendMessage(self.alloc, DidOpen{
-                    .jsonrpc = "2.0",
-                    .method = "textDocument/didOpen",
                     .params = .{
                         .textDocument = .{
-                            .uri = "file:///home/streamer/work/sphimage-editor/src/main.zig",
+                            .uri = main_uri,
                             .languageId = "zig",
                             .version = 1,
                             .text = main_zig_content,
@@ -197,12 +212,10 @@ const App = struct {
                 const id = self.id_allocator.next();
                 try self.outgoing_requests.put(self.alloc, id, .find_references);
                 try sendMessage(self.alloc, FindReferences{
-                    .jsonrpc = "2.0",
                     .id = id,
-                    .method = "textDocument/references",
                     .params = .{
                         .textDocument = .{
-                            .uri = "file:///home/streamer/work/sphimage-editor/src/main.zig",
+                            .uri = main_uri,
                         },
                         .position = .{
                             .line = 19,
@@ -217,12 +230,10 @@ const App = struct {
                 const id2 = self.id_allocator.next();
                 try self.outgoing_requests.put(self.alloc, id2, .find_references);
                 try sendMessage(self.alloc, FindReferences{
-                    .jsonrpc = "2.0",
                     .id = id2,
-                    .method = "textDocument/references",
                     .params = .{
                         .textDocument = .{
-                            .uri = "file:///home/streamer/work/sphimage-editor/src/main.zig",
+                            .uri = main_uri,
                         },
                         .position = .{
                             .line = 1182,
@@ -237,6 +248,7 @@ const App = struct {
             .find_references => {
                 std.debug.print("Find references response time now\n", .{});
                 const response = try std.json.parseFromSlice(FindReferencesResponse, self.alloc, message[json_start..], .{ .ignore_unknown_fields = true });
+                defer response.deinit();
                 std.debug.print("result: {any}", .{response.value.result});
                 if (response.value.result == null) return error.NoResults;
                 for (response.value.result.?) |loc| {
@@ -262,41 +274,23 @@ pub fn main() !void {
 
     const alloc = gpa.allocator();
 
+    const args = try std.process.argsAlloc(alloc);
+    defer std.process.argsFree(alloc, args);
+
+    const project_dir = args[1];
+    const abs_project_dir = try std.fs.cwd().realpathAlloc(alloc, project_dir);
+    defer alloc.free(abs_project_dir);
+
     var process = std.process.Child.init(&.{"zls"}, alloc);
-    process.cwd = "/home/streamer/work/sphimage-editor/";
+    process.cwd = project_dir;
     process.stdin_behavior = .Pipe;
     process.stdout_behavior = .Pipe;
-    //process.stderr_behavior = .Ignore;
 
     try process.spawn();
 
-    var app = try App.init(alloc, process.stdout.?, process.stdin.?);
+    var app = try App.init(alloc, process.stdout.?, process.stdin.?, abs_project_dir);
+    defer app.deinit();
     try app.run();
-    //try sendMessage(alloc, InitializeMessage {
-    //    .jsonrpc = "2.0",
-    //    .id = 1,
-    //    .method = "initialize",
-    //    .params = .{},
-    //}, writer);
-
-    //try sendMessage(alloc, FindReferences {
-    //    .jsonrpc = "2.0",
-    //    .id = 2,
-    //    .method = "textDocument/references",
-    //    .params = .{
-    //        .textDocument = .{
-    //            .uri = "file:///home/streamer/work/sphimage-editor/src/main.zig",
-    //        },
-    //        .position = .{
-    //            .line = 19,
-    //            .character = 8,
-    //        },
-    //        .context = .{
-    //            .includeDeclaration = false,
-    //        },
-    //    },
-    //}, writer);
-    //std.time.sleep(1e9);
 
     _ = try process.kill();
     _ = try process.wait();
