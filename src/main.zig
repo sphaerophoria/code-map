@@ -23,8 +23,9 @@ const IdAllocator = struct {
 const LspReferenceRetreiver = struct {
     process: std.process.Child,
     id_allocator: IdAllocator,
+    language_id: []const u8,
 
-    pub fn init(alloc: Allocator, argv: []const []const u8, cwd: []const u8) !LspReferenceRetreiver {
+    pub fn init(alloc: Allocator, argv: []const []const u8, cwd: []const u8, language_id: []const u8) !LspReferenceRetreiver {
         var process = std.process.Child.init(argv, alloc);
         process.cwd = cwd;
         process.stdin_behavior = .Pipe;
@@ -57,6 +58,7 @@ const LspReferenceRetreiver = struct {
         return .{
             .process = process,
             .id_allocator = id_allocator,
+            .language_id = language_id,
         };
     }
 
@@ -75,26 +77,31 @@ const LspReferenceRetreiver = struct {
         const uri = try std.fmt.allocPrint(alloc, "file://{s}", .{abs_path});
         defer alloc.free(uri);
 
-        const f = try std.fs.openFileAbsolute(abs_path, .{});
-        defer f.close();
-
-        const content = try f.readToEndAlloc(alloc, 1 << 20);
-        defer alloc.free(content);
-
         const writer = self.process.stdin.?.writer();
 
-        // FIXME: Close
-        try sendMessage(alloc, lsp.DidOpenNotification{
-            .params = .{
-                .textDocument = .{
-                    .uri = uri,
-                    .languageId = "zig",
-                    .version = 1,
-                    .text = content,
-                },
-            },
-        }, writer);
+        {
+            const f = try std.fs.openFileAbsolute(abs_path, .{});
+            defer f.close();
 
+            const content = try f.readToEndAlloc(alloc, 1 << 20);
+            defer alloc.free(content);
+
+            const start = try std.time.Instant.now();
+            try sendMessage(alloc, lsp.DidOpenNotification{
+                .params = .{
+                    .textDocument = .{
+                        .uri = uri,
+                        .languageId = self.language_id,
+                        .version = 1,
+                        .text = content,
+                    },
+                },
+            }, writer);
+            const end = try std.time.Instant.now();
+            std.debug.print("did open: {d}ms\n", .{end.since(start) / std.time.ns_per_ms});
+        }
+
+        const start = try std.time.Instant.now();
         const id = self.id_allocator.next();
         try sendMessage(alloc, lsp.FindReferences{
             .id = id,
@@ -113,6 +120,9 @@ const LspReferenceRetreiver = struct {
         }, writer);
 
         const response = try waitResponseLeaky(lsp.FindReferencesResponse, alloc, self.process.stdout.?);
+
+        const end = try std.time.Instant.now();
+        std.debug.print("find references: {d}ms\n", .{end.since(start) / std.time.ns_per_ms});
         return response.result orelse return error.NoReferences;
     }
 
@@ -151,7 +161,7 @@ pub fn main() !void {
     const abs_project_dir = try std.fs.cwd().realpathAlloc(alloc, project_dir);
     defer alloc.free(abs_project_dir);
 
-    var retriever = try LspReferenceRetreiver.init(alloc, &.{"zls"}, abs_project_dir);
+    var retriever = try LspReferenceRetreiver.init(alloc, &.{"zls"}, abs_project_dir, "zig");
     defer retriever.deinit();
 
     var arena = std.heap.ArenaAllocator.init(alloc);
@@ -160,8 +170,11 @@ pub fn main() !void {
     const abs_file = try std.fs.cwd().realpathAlloc(alloc, file);
     defer alloc.free(abs_file);
 
-    const references = try retriever.findReferencesLeaky(arena.allocator(), abs_file, line, col);
-    for (references) |loc| {
-        std.debug.print("ref: {s} ({d}, {d})\n", .{loc.uri, loc.range.start.line, loc.range.start.character});
+    for (0..3) |_| {
+        const references = try retriever.findReferencesLeaky(arena.allocator(), abs_file, line, col);
+        for (references) |loc| {
+            std.debug.print("ref: {s} ({d}, {d})\n", .{loc.uri, loc.range.start.line, loc.range.start.character});
+        }
+        _ = arena.reset(.retain_capacity);
     }
 }
