@@ -104,12 +104,6 @@ fn addReferencesToDb(alloc: Allocator, abs_project_dir: []const u8, node_being_r
     // A
     // A.B
     // A.B.c
-    //
-
-    //var references_tmp = references.*;
-    //while (references_tmp.next()) |ref| {
-    //    std.debug.print("{s} {d}\n", .{ ref.uri, ref.range.start.line });
-    //}
 
     var append_it: ?Db.NodeId = node_being_referenced;
     while (append_it) |append_id| {
@@ -122,20 +116,9 @@ fn addReferencesToDb(alloc: Allocator, abs_project_dir: []const u8, node_being_r
                 std.debug.print("skipping path: {s}\n", .{ref.uri});
                 continue;
             };
-            //std.debug.print("Processing path: {s}\n", .{ref_path});
-            //// Node == Glfw
-            //// Ref == Glfw.init
-            ////
-            //// Self references don't count. E.g. Glfw.init shouldn't claim
-            //// that it references Glfw. It artifically inflates the ref
-            //// count and isn't really useful info
-            //if (node.data.containsLocation(ref_path, ref.range.start)) {
-            //    continue;
-            //}
 
             var reference_nodes = db.nodesContainingLoc(ref_path, ref.range.start);
 
-            // fn memberFn(self: Parent)
             while (reference_nodes.next()) |ref_node_id| {
                 // Node == AppWidget.render
                 // Ref == AppWidget.vtable.render
@@ -143,23 +126,13 @@ fn addReferencesToDb(alloc: Allocator, abs_project_dir: []const u8, node_being_r
                 // AppWidget contains AppWidget.vtable which means that the
                 // node_id here will sometimes be AppWidget, which results in
                 // AppWidget references AppWidget.render, which is silly
-                //
-                // gui/gui.zig
-                // gui/gui.zig/Widget
                 const ref_node = db.getNode(ref_node_id);
                 if (!ref_node.data.containsNodeData(node.data) and !node.data.containsNodeData(ref_node.data)) {
-                    if (std.mem.eql(u8, ref_node.name, "sphmath.zig.length") and std.mem.eql(u8, node.name, "sphmath.zig")) {
-                        unreachable;
-                    }
-                    if (std.mem.eql(u8, node.name, "sphmath.zig.length") and std.mem.eql(u8, ref_node.name, "sphmath.zig")) {
-                        unreachable;
-                    }
                     try node.referenced_by.append(alloc, ref_node_id);
                 }
             }
         }
     }
-
     var append_node: ?Db.NodeId = node_being_referenced;
     while (append_node) |nid| {
         // For each ref, check if it is a child of us, if it is, ignore
@@ -428,7 +401,11 @@ pub fn main() !void {
 
         const db_json = try std.fs.cwd().createFile("db.json", .{});
         defer db_json.close();
-        try std.json.stringify(db.nodes.items, .{ .whitespace = .indent_2 }, db_json.writer());
+
+        const savedata = try db.save(alloc);
+        defer alloc.free(savedata);
+
+        try std.json.stringify(savedata, .{ .whitespace = .indent_2 }, db_json.writer());
         //logAllReferences(db);
     }
 }

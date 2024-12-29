@@ -6,7 +6,9 @@ const TextPosition = coords.TextPosition;
 
 const Db = @This();
 
-pub const NodeId = struct { value: usize };
+pub const NodeId = packed struct(usize) {
+    value: usize,
+};
 
 const NodeData = union(enum) {
     within_file: struct {
@@ -16,13 +18,33 @@ const NodeData = union(enum) {
     },
     filesystem: []const u8,
 
-    fn deinit(self: *NodeData, alloc: Allocator) void {
+    pub fn deinit(self: *NodeData, alloc: Allocator) void {
         switch (self.*) {
             .within_file => |d| {
                 alloc.free(d.path);
             },
             .filesystem => |p| {
                 alloc.free(p);
+            },
+        }
+    }
+
+    pub fn clone(self: NodeData, alloc: Allocator) !NodeData {
+        switch (self) {
+            .within_file => |d| {
+                const path = try alloc.dupe(u8, d.path);
+                errdefer alloc.free(path);
+
+                return .{
+                    .within_file = .{
+                        .path = path,
+                        .ident_range = d.ident_range,
+                        .range = d.range,
+                    },
+                };
+            },
+            .filesystem => |p| {
+                return .{ .filesystem = try alloc.dupe(u8, p) };
             },
         }
     }
@@ -65,15 +87,95 @@ pub const Node = struct {
     parent: ?NodeId,
     data: NodeData,
     referenced_by: std.ArrayListUnmanaged(NodeId) = .{},
+
+    pub const SaveData = struct {
+        name: []const u8,
+        parent: ?usize,
+        data: NodeData,
+        referenced_by: []const usize,
+    };
+
+    pub fn deinit(self: *Node, alloc: Allocator) void {
+        alloc.free(self.name);
+        self.referenced_by.deinit(alloc);
+        self.data.deinit(alloc);
+    }
+
+    pub fn load(alloc: Allocator, savedata: Node.SaveData) !Node {
+        const name = try alloc.dupe(u8, savedata.name);
+        errdefer alloc.free(name);
+
+        var data = try savedata.data.clone(alloc);
+        errdefer data.deinit(alloc);
+
+        std.debug.assert(@alignOf(NodeId) == @alignOf(usize));
+        std.debug.assert(@sizeOf(NodeId) == @sizeOf(usize));
+
+        var referenced_by = std.ArrayListUnmanaged(NodeId){};
+        errdefer referenced_by.deinit(alloc);
+
+        try referenced_by.appendSlice(alloc, @ptrCast(savedata.referenced_by));
+
+        return .{
+            .name = name,
+            .parent = if (savedata.parent) |v| .{ .value = v } else null,
+            .data = data,
+            .referenced_by = referenced_by,
+        };
+    }
+
+    pub fn save(self: Node) Node.SaveData {
+        std.debug.assert(@alignOf(NodeId) == @alignOf(usize));
+        std.debug.assert(@sizeOf(NodeId) == @sizeOf(usize));
+
+        return .{
+            .name = self.name,
+            .parent = if (self.parent) |v| v.value else null,
+            .data = self.data,
+            .referenced_by = @ptrCast(self.referenced_by.items),
+        };
+    }
 };
 
 nodes: std.ArrayListUnmanaged(Node) = .{},
 
+pub const SaveData = []Node.SaveData;
+
+pub fn save(self: Db, alloc: Allocator) !SaveData {
+    const ret = try alloc.alloc(Node.SaveData, self.nodes.items.len);
+    errdefer alloc.free(ret);
+
+    for (0..self.nodes.items.len) |i| {
+        ret[i] = self.nodes.items[i].save();
+    }
+
+    return ret;
+}
+
+pub fn load(alloc: Allocator, savedata: SaveData) !Db {
+    var nodes = std.ArrayListUnmanaged(Node){};
+    errdefer {
+        for (nodes.items) |*node| {
+            node.deinit(alloc);
+        }
+        nodes.deinit(alloc);
+    }
+
+    for (savedata) |node| {
+        var loaded = try Node.load(alloc, node);
+        errdefer loaded.deinit(alloc);
+
+        try nodes.append(alloc, loaded);
+    }
+
+    return .{
+        .nodes = nodes,
+    };
+}
+
 pub fn deinit(self: *Db, alloc: Allocator) void {
     for (self.nodes.items) |*node| {
-        alloc.free(node.name);
-        node.referenced_by.deinit(alloc);
-        node.data.deinit(alloc);
+        node.deinit(alloc);
     }
     self.nodes.deinit(alloc);
 }
@@ -203,5 +305,57 @@ pub const IdIter = struct {
 pub fn idIter(self: Db) IdIter {
     return .{
         .max = self.nodes.items.len,
+    };
+}
+
+/// Allows us to store extra data that is indexed by NodeId that is not
+/// captured by the DB itself
+pub fn ExtraData(comptime T: type) type {
+    return struct {
+        data: []T,
+
+        const Self = @This();
+
+        pub fn deinit(self: Self, alloc: Allocator) void {
+            alloc.free(self.data);
+        }
+
+        pub fn clone(self: Self, alloc: Allocator) !Self {
+            const data = try alloc.dupe(T, self.data);
+            return .{
+                .data = data,
+            };
+        }
+
+        pub fn idIter(self: Self) IdIter {
+            return .{
+                .max = self.data.len,
+            };
+        }
+
+        pub fn idIterAfter(self: Self, id: NodeId) IdIter {
+            return .{
+                .idx = id.value + 1,
+                .max = self.data.len,
+            };
+        }
+
+        pub fn get(self: Self, id: NodeId) T {
+            return self.data[id.value];
+        }
+
+        pub fn getPtr(self: *Self, id: NodeId) *T {
+            return &self.data[id.value];
+        }
+    };
+}
+
+pub fn makeExtraData(self: Db, comptime T: type, alloc: Allocator, default_val: T) !ExtraData(T) {
+    const data = try alloc.alloc(T, self.nodes.items.len);
+    errdefer alloc.free(data);
+    @memset(data, default_val);
+
+    return .{
+        .data = data,
     };
 }

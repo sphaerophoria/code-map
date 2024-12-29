@@ -51,6 +51,7 @@ fn mouseButtonCallbackGlfw(window: ?*glfwb.GLFWwindow, button: c_int, action: c_
         };
     }
 }
+
 const Glfw = struct {
     window: *glfwb.GLFWwindow = undefined,
     queue: Fifo = undefined,
@@ -164,15 +165,16 @@ fn appendLinePointsToBuf(buf: *std.ArrayList(sphrender.PlaneRenderProgram.Buffer
     });
 }
 
-fn updateLineBuffer(alloc: Allocator, buf: *sphrender.PlaneRenderProgram.Buffer, graph: Graph, line_width: f32) !void {
+fn updateLineBuffer(alloc: Allocator, buf: *sphrender.PlaneRenderProgram.Buffer, db: Db, positions: Db.ExtraData(Vec2), line_width: f32) !void {
     var cpu_buf = std.ArrayList(sphrender.PlaneRenderProgram.Buffer.BufferPoint).init(alloc);
     defer cpu_buf.deinit();
 
-    for (0..graph.nodes.len) |i| {
-        const node = graph.nodes[i];
-        const a = graph.positions[i];
+    var node_it = db.idIter();
+    while (node_it.next()) |node_id| {
+        const node = db.getNode(node_id);
+        const a = positions.get(node_id);
         for (node.referenced_by.items) |ref_id| {
-            const b = graph.positions[ref_id.value];
+            const b = positions.get(ref_id);
             try appendLinePointsToBuf(&cpu_buf, a, b, line_width);
         }
     }
@@ -180,12 +182,14 @@ fn updateLineBuffer(alloc: Allocator, buf: *sphrender.PlaneRenderProgram.Buffer,
     buf.updateBuffer(cpu_buf.items);
 }
 
-fn updateNodeBuffer(alloc: Allocator, buf: *sphrender.PlaneRenderProgram.Buffer, positions: []const sphmath.Vec2, circle_radius: f32) !void {
+fn updateNodeBuffer(alloc: Allocator, buf: *sphrender.PlaneRenderProgram.Buffer, positions: Db.ExtraData(Vec2), circle_radius: f32) !void {
     const BufferPoint = sphrender.PlaneRenderProgram.Buffer.BufferPoint;
     var buf_points = std.ArrayList(BufferPoint).init(alloc);
     defer buf_points.deinit();
 
-    for (positions) |pos| {
+    var it = positions.idIter();
+    while (it.next()) |node_id| {
+        const pos = positions.get(node_id);
         const tl = BufferPoint{
             .clip_x = pos[0] - circle_radius,
             .clip_y = pos[1] + circle_radius,
@@ -224,168 +228,101 @@ fn updateNodeBuffer(alloc: Allocator, buf: *sphrender.PlaneRenderProgram.Buffer,
 }
 
 const Graph = struct {
-    nodes: []const Db.Node,
-    positions: []sphmath.Vec2,
-    // FIXME: Migrate to DB
-    num_children: []const u32,
+    db: *const Db,
+
+    protected: struct {
+        mutex: std.Thread.Mutex = .{},
+        positions: Db.ExtraData(Vec2),
+        shutdown: bool = false,
+    },
+
+    num_children: Db.ExtraData(u32),
 
     pull_multiplier: f32 = 0.200,
     parent_pull_multiplier: f32 = 1.220,
     push_multiplier: f32 = 22.300,
     center_pull_multiplier: f32 = 0.34,
-    // FIXME: unused
-    push_offs: f32 = 1.0,
 
     max_pull_movement: f32 = 0.020,
     max_parent_pull_movement: f32 = 0.209,
     max_push_movement: f32 = 0.117,
     max_center_movement: f32 = 0.012,
 
-    fn init(alloc: Allocator, nodes: []const Db.Node, num_children: []const u32) !Graph {
-        const positions = try alloc.alloc(sphmath.Vec2, nodes.len);
+    fn init(alloc: Allocator, db: *const Db) !Graph {
+        var positions = try db.makeExtraData(Vec2, alloc, undefined);
+        errdefer positions.deinit(alloc);
 
         var rng = std.Random.DefaultPrng.init(@bitCast(std.time.timestamp()));
         var rand = rng.random();
-        for (positions) |*pos| {
+        var node_it = db.idIter();
+        while (node_it.next()) |id| {
+            const pos = positions.getPtr(id);
             const x = rand.float(f32) * 2 - 1;
             const y = rand.float(f32) * 2 - 1;
             pos.* = .{ x, y };
         }
 
+        const num_children = try calcChildrenForNodes(alloc, db.*);
+
         return .{
-            .nodes = nodes,
-            .positions = positions,
+            .db = db,
+            .protected = .{
+                .positions = positions,
+            },
             .num_children = num_children,
         };
     }
 
     fn deinit(self: *Graph, alloc: Allocator) void {
-        alloc.free(self.positions);
+        self.protected.positions.deinit(alloc);
+        self.num_children.deinit(alloc);
     }
 
-    fn maxReferences(alloc: Allocator, reference_list: []const Db.NodeId) !u32 {
-        var reference_counts = std.AutoHashMap(Db.NodeId, u32).init(alloc);
-        defer reference_counts.deinit();
+    pub fn snapshotPositions(self: *Graph, alloc: Allocator) !Db.ExtraData(Vec2) {
+        self.protected.mutex.lock();
+        defer self.protected.mutex.unlock();
 
-        for (reference_list) |ref| {
-            const gop = try reference_counts.getOrPut(ref);
-            if (!gop.found_existing) {
-                gop.value_ptr.* = 0;
-            }
-
-            gop.value_ptr.* += 1;
-        }
-
-        var max: u32 = 0;
-        var it = reference_counts.iterator();
-        while (it.next()) |kv| {
-            max = @max(kv.value_ptr.*, max);
-        }
-
-        return max;
+        return self.protected.positions.clone(alloc);
     }
 
-    fn step(self: *Graph, alloc: Allocator, step_speed: f32) !void {
-        const movements = try alloc.alloc(sphmath.Vec2, self.positions.len);
-        defer alloc.free(movements);
-        @memset(movements, .{ 0, 0 });
+    pub fn run(self: *Graph, alloc: Allocator) !void {
+        // Run fast initially, then slow down to prevent burning CPU
+        var step_speed: f32 = 7.0;
+        while (try self.step(alloc, step_speed)) {
+            const sleep_time: u64 = if (step_speed > 1.0)
+                // Small sleep time to prevent mutex contention
+                10
+            else
+                30 * std.time.ns_per_ms;
 
-        // Pull referenced nodes
-        for (self.nodes, movements, self.positions) |node, *movement, pos| {
-            for (node.referenced_by.items) |ref| {
-                const other_pos = self.positions[ref.value];
-                const pull = calcPull(other_pos - pos, self.pull_multiplier, self.max_pull_movement / @as(f32, @floatFromInt(node.referenced_by.items.len)));
-                //std.debug.assert(pull[0] <= sphmath.length(other_pos - pos));
+            step_speed -= 0.01;
+            step_speed = @max(1.00, step_speed);
 
-                const half_pull: Vec2 = pull / sphmath.Vec2{ 2, 2 };
-                movement.* += pull;
-                movements[ref.value] -= half_pull;
-            }
-
-            //if (std.mem.eql(u8, node.name, "logError")) {
-            //    for (node.referenced_by.items) |ref| {
-            //        const ref_node = self.nodes[ref.value];
-            //        const ref_pos = self.positions[ref.value];
-            //        //std.debug.print("Referenced by {s} with pos {d} {d}\n" ,.{ref_node.name, ref_pos[0], ref_pos[1]});
-            //    }
-            //    //std.debug.print("movement {d} {d}\n" ,.{movement.*[0], movement.*[1]});
-
-            //}
-        }
-
-        // Keep all children nearby... Some really aggressive pull
-        // Pull parent by addition of all children pulls  / num children
-
-        // Pull towards our parent
-        for (self.nodes, movements, self.positions) |node, *movement, pos| {
-            const parent_id = node.parent orelse continue;
-
-            const num_siblings: sphmath.Vec2 = .{
-                @floatFromInt(self.num_children[parent_id.value]),
-                @floatFromInt(self.num_children[parent_id.value]),
-            };
-
-            //// Pull parent with us a bit
-            //movements[parent_id.value] += movement.* / num_siblings;
-
-            const parent_pos = self.positions[parent_id.value];
-            // Keep us in range of parent
-            // FIXME: tune parent pulling, needs same changes as other pull/push
-            const parent_pull = calcPull(parent_pos - pos, self.parent_pull_multiplier, self.max_parent_pull_movement / num_siblings[0]);
-            const half_pull: Vec2 = parent_pull / sphmath.Vec2{ 2, 2 };
-            movement.* += half_pull;
-            movements[parent_id.value] -= half_pull;
-        }
-
-        // Push nearby nodes away from us
-        for (0..movements.len - 1) |i| {
-            const a_pos = self.positions[i];
-            var total_push_movement = Vec2{ 0, 0 };
-            for (i + 1..movements.len) |j| {
-                const b_pos = self.positions[j];
-                const push = calcPush(b_pos - a_pos, self.push_multiplier, self.max_push_movement / @as(f32, @floatFromInt(movements.len - 1)));
-                total_push_movement += push;
-                //std.debug.print("a: {any}, b: {any}, push: {any}\n", .{a_pos, b_pos, push});
-                std.debug.assert(!std.math.isNan(push[0]));
-                const half_push = push / sphmath.Vec2{ 2, 2 };
-                movements[j] += half_push;
-                movements[i] += -half_push;
-            }
-
-            //std.debug.assert(sphmath.length(total_push_movement) < self.max_push_movement);
-        }
-
-        // Pull towards center to prevent nodes pushing up against the edges of
-        // the window
-        for (self.positions, movements) |pos, *movement| {
-            const pull = calcPull(-pos, self.center_pull_multiplier, self.max_center_movement);
-            movement.* += pull;
-        }
-
-        // Apply movement
-        for (self.positions, movements) |*pos, movement| {
-            pos.* += movement * @as(Vec2, @splat(step_speed));
-        }
-
-        var average_pos = @Vector(2, f64){ 0.0, 0.0 };
-
-        for (self.positions) |pos| {
-            average_pos += pos;
-        }
-        average_pos /= sphmath.Vec2{
-            @floatFromInt(self.positions.len),
-            @floatFromInt(self.positions.len),
-        };
-
-        //std.debug.print("Average pos: {any}\n", .{average_pos});
-        for (self.positions) |*pos| {
-            pos.* -= @floatCast(average_pos);
-            pos.*[0] = std.math.clamp(pos.*[0], -1, 1);
-            pos.*[1] = std.math.clamp(pos.*[1], -1, 1);
-            std.debug.assert(!std.math.isNan(pos.*[0]));
+            std.time.sleep(sleep_time);
         }
     }
 
+    fn step(self: *Graph, alloc: Allocator, step_speed: f32) !bool {
+        self.protected.mutex.lock();
+        defer self.protected.mutex.unlock();
+        const positions = &self.protected.positions;
+
+        var movements = try self.db.makeExtraData(Vec2, alloc, .{ 0, 0 });
+        defer movements.deinit(alloc);
+
+        self.pullReferences(positions.*, &movements);
+        self.pullParents(positions.*, &movements);
+        self.pushNodes(positions.*, &movements);
+        // Because of how we push nodes away from eachother, there is a
+        // tendency for items to end up outside the bounds of the window. Pull
+        // them back
+        self.pullCenter(positions.*, &movements);
+        applyMovements(positions, movements, step_speed);
+
+        return !self.protected.shutdown;
+    }
+
+    // FIXME: Name params better
     fn calcPull(offs: sphmath.Vec2, multiplier: f32, max_dist: f32) sphmath.Vec2 {
         const dist = sphmath.length(offs);
         const dir = if (dist == 0) return .{ 0.0, 0.0 } else sphmath.normalize(offs);
@@ -401,34 +338,134 @@ const Graph = struct {
         return dir * @as(sphmath.Vec2, @splat(push_mag));
     }
 
-    fn relevantPositions(self: Graph, alloc: Allocator) ![]sphmath.Vec2 {
-        var output = std.ArrayList(sphmath.Vec2).init(alloc);
-        defer output.deinit();
+    fn applyBidirectionalPull(a: Db.NodeId, b: Db.NodeId, pull: Vec2, movements: *Db.ExtraData(Vec2)) void {
+        const half_pull: Vec2 = pull / sphmath.Vec2{ 2, 2 };
+        movements.getPtr(a).* += half_pull;
+        movements.getPtr(b).* -= half_pull;
+    }
 
-        for (self.nodes, self.positions) |node, position| {
-            if (node.referenced_by.items.len > 0) {
-                try output.append(position);
+    fn pullReferences(self: Graph, positions: Db.ExtraData(Vec2), movements: *Db.ExtraData(Vec2)) void {
+        var node_it = self.db.idIter();
+        while (node_it.next()) |node_id| {
+            const node = self.db.getNode(node_id);
+            const pos = positions.get(node_id);
+            const num_referecnes_f: f32 = @floatFromInt(node.referenced_by.items.len);
+
+            // If each ref can pull us by max/num, then if every references
+            // pulls as much as it can, we will move by max_pull
+            const max_ref_pull = self.max_pull_movement / num_referecnes_f;
+
+            for (node.referenced_by.items) |ref| {
+                const other_pos = positions.get(ref);
+                const pull = calcPull(
+                    other_pos - pos,
+                    self.pull_multiplier,
+                    max_ref_pull,
+                );
+
+                applyBidirectionalPull(node_id, ref, pull, movements);
             }
         }
+    }
 
-        return try output.toOwnedSlice();
+    fn pullParents(self: Graph, positions: Db.ExtraData(Vec2), movements: *Db.ExtraData(Vec2)) void {
+        var id_iter = self.db.idIter();
+        while (id_iter.next()) |node_id| {
+            const node = self.db.getNode(node_id);
+            const pos = positions.get(node_id);
+
+            const parent_id = node.parent orelse continue;
+
+            const num_siblings_f: f32 = @floatFromInt(self.num_children.get(parent_id));
+
+            const parent_pos = positions.get(parent_id);
+            // Keep us in range of parent
+            const parent_pull = calcPull(
+                parent_pos - pos,
+                self.parent_pull_multiplier,
+                self.max_parent_pull_movement / num_siblings_f,
+            );
+
+            applyBidirectionalPull(node_id, parent_id, parent_pull, movements);
+        }
+    }
+
+    fn pushNodes(self: Graph, positions: Db.ExtraData(Vec2), movements: *Db.ExtraData(Vec2)) void {
+        const num_items_f: f32 = @floatFromInt(movements.data.len - 1);
+        // If each elem can only push by max push / num items, if all items
+        // push the max amount, we will move by max push
+        const max_pair_push = self.max_push_movement / num_items_f;
+
+        var a_it = positions.idIter();
+        while (a_it.next()) |a_id| {
+            const a_pos = positions.get(a_id);
+
+            var b_it = positions.idIterAfter(a_id);
+
+            while (b_it.next()) |b_id| {
+                const b_pos = positions.get(b_id);
+                const push = calcPush(
+                    b_pos - a_pos,
+                    self.push_multiplier,
+                    max_pair_push,
+                );
+
+                // Backwards ids to turn the pull into a push
+                applyBidirectionalPull(b_id, a_id, push, movements);
+            }
+        }
+    }
+
+    fn pullCenter(self: Graph, positions: Db.ExtraData(Vec2), movements: *Db.ExtraData(Vec2)) void {
+        var it = positions.idIter();
+        while (it.next()) |id| {
+            const pos = positions.get(id);
+            const movement = movements.getPtr(id);
+            const pull = calcPull(-pos, self.center_pull_multiplier, self.max_center_movement);
+            movement.* += pull;
+        }
+    }
+
+    fn applyMovements(positions: *Db.ExtraData(Vec2), movements: Db.ExtraData(Vec2), movement_multiplier: f32) void {
+        var it = positions.idIter();
+        while (it.next()) |id| {
+            const pos = positions.getPtr(id);
+            const movement = movements.get(id);
+            pos.* += movement * @as(Vec2, @splat(movement_multiplier));
+            pos.*[0] = std.math.clamp(pos.*[0], -1, 1);
+            pos.*[1] = std.math.clamp(pos.*[1], -1, 1);
+        }
+    }
+
+    fn calcChildrenForNodes(alloc: Allocator, db: Db) !Db.ExtraData(u32) {
+        var ret = try db.makeExtraData(u32, alloc, 0);
+
+        var it = db.idIter();
+        while (it.next()) |id| {
+            const node = db.getNode(id);
+            if (node.parent) |v| {
+                ret.getPtr(v).* += 1;
+            }
+        }
+        return ret;
     }
 };
 
-fn findItemUnderCursor(graph: Graph, mouse_pos_px: sphui.MousePos, window_width: f32, window_height: f32) usize {
+fn findItemUnderCursor(positions: Db.ExtraData(Vec2), mouse_pos_px: sphui.MousePos, window_width: f32, window_height: f32) Db.NodeId {
     const mouse_pos_clip = Vec2{
         mouse_pos_px.x / window_width * 2 - 1,
         1.0 - mouse_pos_px.y / window_height * 2,
     };
 
     var closest_dist = std.math.inf(f32);
-    var closest_idx: usize = 0;
+    var closest_idx = Db.NodeId{ .value = 0 };
 
-    for (0..graph.positions.len) |i| {
-        const mouse_item_dist = sphmath.length2(mouse_pos_clip - graph.positions[i]);
+    var it = positions.idIter();
+    while (it.next()) |id| {
+        const mouse_item_dist = sphmath.length2(mouse_pos_clip - positions.get(id));
         if (mouse_item_dist < closest_dist) {
             closest_dist = mouse_item_dist;
-            closest_idx = i;
+            closest_idx = id;
         }
     }
 
@@ -443,7 +480,6 @@ pub const UiAction = union(enum) {
     change_max_pull_movement: f32,
     change_max_parent_pull_movement: f32,
     change_max_push_movement: f32,
-    change_push_offs: f32,
     change_point_radius: f32,
     change_max_center_movement: f32,
     change_line_thickness: f32,
@@ -457,22 +493,21 @@ pub const UiAction = union(enum) {
     }
 };
 
-fn appendFloatToPropertyList(
+const PropertyListGen = struct {
     property_list: *sphui.property_list.PropertyList(UiAction),
     widget_factory: *sphui.widget_factory.WidgetFactory(UiAction),
-    name: []const u8,
-    elem: *f32,
-    action_gen: *const fn (f32) UiAction,
     speed: f32,
-) !void {
-    const key = try widget_factory.makeLabel(name);
-    errdefer key.deinit(widget_factory.alloc);
 
-    const value = try widget_factory.makeDragFloat(elem, action_gen, speed);
-    errdefer value.deinit(widget_factory.alloc);
+    fn add(self: PropertyListGen, name: anytype, elem: anytype, comptime tag: std.meta.Tag(UiAction)) !void {
+        const key = try self.widget_factory.makeLabel(name);
+        errdefer key.deinit(self.widget_factory.alloc);
 
-    try property_list.pushWidgets(widget_factory.alloc, key, value);
-}
+        const value = try self.widget_factory.makeDragFloat(elem, &UiAction.makeDragGen(tag), self.speed);
+        errdefer value.deinit(self.widget_factory.alloc);
+
+        try self.property_list.pushWidgets(self.widget_factory.alloc, key, value);
+    }
+};
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -490,26 +525,19 @@ pub fn main() !void {
         var json_reader = std.json.reader(alloc, saved_db_f.reader());
         defer json_reader.deinit();
 
-        break :blk try std.json.parseFromTokenSource([]Db.Node, alloc, &json_reader, .{});
+        break :blk try std.json.parseFromTokenSource(Db.SaveData, alloc, &json_reader, .{});
     };
     defer db_parsed.deinit();
 
-    const children_for_nodes = try alloc.alloc(u32, db_parsed.value.len);
-    defer alloc.free(children_for_nodes);
+    var db = try Db.load(alloc, db_parsed.value);
+    defer db.deinit(alloc);
 
-    @memset(children_for_nodes, 0);
-
-    for (db_parsed.value) |node| {
-        if (node.parent) |id| {
-            children_for_nodes[id.value] += 1;
-        }
-    }
-
-    var graph = try Graph.init(alloc, db_parsed.value, children_for_nodes);
+    var graph = try Graph.init(alloc, &db);
     defer graph.deinit(alloc);
 
     var glfw: Glfw = undefined;
-    const window_width = 800;
+    const window_width = 1100;
+    const sidebar_width = 300;
     const window_height = 800;
     try glfw.initPinned(window_width, window_height);
 
@@ -543,104 +571,24 @@ pub fn main() !void {
     var point_radius: f32 = 0.014;
     var line_thickness: f32 = 0.005;
 
-    try appendFloatToPropertyList(
-        property_list,
-        widget_factory,
-        "Max pull movement",
-        &graph.max_pull_movement,
-        &UiAction.makeDragGen(.change_max_pull_movement),
-        0.001,
-    );
+    var property_list_gen = PropertyListGen{
+        .property_list = property_list,
+        .widget_factory = widget_factory,
+        .speed = 0.001,
+    };
 
-    try appendFloatToPropertyList(
-        property_list,
-        widget_factory,
-        "Max parent pull movement",
-        &graph.max_parent_pull_movement,
-        &UiAction.makeDragGen(.change_max_parent_pull_movement),
-        0.001,
-    );
+    try property_list_gen.add("Max pull movement", &graph.max_pull_movement, .change_max_pull_movement);
+    try property_list_gen.add("Max parent pull movement", &graph.max_parent_pull_movement, .change_max_parent_pull_movement);
+    try property_list_gen.add("Max push movement", &graph.max_push_movement, .change_max_push_movement);
+    try property_list_gen.add("Max center pull", &graph.max_center_movement, .change_max_center_movement);
 
-    try appendFloatToPropertyList(
-        property_list,
-        widget_factory,
-        "Max push movement",
-        &graph.max_push_movement,
-        &UiAction.makeDragGen(.change_max_push_movement),
-        0.001,
-    );
+    try property_list_gen.add("Pull multiplier", &graph.pull_multiplier, .change_pull_multiplier);
+    try property_list_gen.add("Parent pull multiplier", &graph.parent_pull_multiplier, .change_parent_pull_multiplier);
+    try property_list_gen.add("Center pull multiplier", &graph.center_pull_multiplier, .change_center_pull_multiplier);
+    try property_list_gen.add("Push multiplier", &graph.push_multiplier, .change_push_multiplier);
 
-    try appendFloatToPropertyList(
-        property_list,
-        widget_factory,
-        "Pull multiplier",
-        &graph.pull_multiplier,
-        &UiAction.makeDragGen(.change_pull_multiplier),
-        0.001,
-    );
-
-    try appendFloatToPropertyList(
-        property_list,
-        widget_factory,
-        "Parent pull multiplier",
-        &graph.parent_pull_multiplier,
-        &UiAction.makeDragGen(.change_parent_pull_multiplier),
-        0.01,
-    );
-
-    try appendFloatToPropertyList(
-        property_list,
-        widget_factory,
-        "Center pull multiplier",
-        &graph.center_pull_multiplier,
-        &UiAction.makeDragGen(.change_center_pull_multiplier),
-        0.001,
-    );
-
-    try appendFloatToPropertyList(
-        property_list,
-        widget_factory,
-        "Max center pull",
-        &graph.max_center_movement,
-        &UiAction.makeDragGen(.change_max_center_movement),
-        0.001,
-    );
-
-    try appendFloatToPropertyList(
-        property_list,
-        widget_factory,
-        "Push multiplier",
-        &graph.push_multiplier,
-        &UiAction.makeDragGen(.change_push_multiplier),
-        0.1,
-    );
-
-    try appendFloatToPropertyList(
-        property_list,
-        widget_factory,
-        "Push offs",
-        &graph.push_offs,
-        &UiAction.makeDragGen(.change_push_offs),
-        0.1,
-    );
-
-    try appendFloatToPropertyList(
-        property_list,
-        widget_factory,
-        "Point radius",
-        &point_radius,
-        &UiAction.makeDragGen(.change_point_radius),
-        0.001,
-    );
-
-    try appendFloatToPropertyList(
-        property_list,
-        widget_factory,
-        "Line thickness",
-        &line_thickness,
-        &UiAction.makeDragGen(.change_line_thickness),
-        0.001,
-    );
+    try property_list_gen.add("Point radius", &point_radius, .change_point_radius);
+    try property_list_gen.add("Line thickness", &line_thickness, .change_line_thickness);
 
     var selected_node = Db.NodeId{ .value = 0 };
     {
@@ -648,16 +596,16 @@ pub fn main() !void {
         errdefer key.deinit(widget_factory.alloc);
 
         const SelectedNameTextRetriever = struct {
-            nodes: []const Db.Node,
+            db: *const Db,
             selected_node: *const Db.NodeId,
 
             pub fn getText(self: @This()) []const u8 {
-                return self.nodes[self.selected_node.value].name;
+                return self.db.getNode(self.selected_node.*).name;
             }
         };
 
         const value = try widget_factory.makeLabel(SelectedNameTextRetriever{
-            .nodes = graph.nodes,
+            .db = &db,
             .selected_node = &selected_node,
         });
         errdefer value.deinit(widget_factory.alloc);
@@ -677,122 +625,57 @@ pub fn main() !void {
     var line_buf = line_prog.makeDefaultBuffer();
     defer line_buf.deinit();
 
-    var step_speed: f32 = 5.0;
+    const t = try std.Thread.spawn(.{}, Graph.run, .{ &graph, alloc });
+    defer {
+        graph.protected.mutex.lock();
+        graph.protected.shutdown = true;
+        graph.protected.mutex.unlock();
+        t.join();
+    }
 
     while (!glfw.closed()) {
-        // FIXME: Use a real time interval
-        try graph.step(alloc, step_speed);
-        step_speed -= 0.01;
-        step_speed = @max(0.00, step_speed);
-
         gl.glClearColor(0.0, 0.0, 0.0, 1.0);
         gl.glClear(gl.GL_COLOR_BUFFER_BIT);
 
-        try updateLineBuffer(alloc, &line_buf, graph, line_thickness);
+        const positions = try graph.snapshotPositions(alloc);
+        defer positions.deinit(alloc);
+
+        gl.glViewport(sidebar_width, 0, window_width - sidebar_width, window_height);
+
+        try updateLineBuffer(alloc, &line_buf, db, positions, line_thickness);
         line_prog.render(line_buf, &.{}, &.{}, sphmath.Transform.identity);
 
-        try updateNodeBuffer(alloc, &point_buf, graph.positions, point_radius);
+        try updateNodeBuffer(alloc, &point_buf, positions, point_radius);
         circle_prog.render(point_buf, &.{.{ .float3 = .{ 1.0, 1.0, 1.0 } }}, &.{}, sphmath.Transform.identity);
-
-        {
-            var appwidget_positions = std.ArrayList(sphmath.Vec2).init(alloc);
-            defer appwidget_positions.deinit();
-            for (graph.nodes, graph.positions) |node, pos| {
-                if (std.mem.startsWith(u8, node.name, "gui.zig.Widget")) {
-                    try appwidget_positions.append(pos);
-                }
-            }
-
-            try updateNodeBuffer(alloc, &point_buf, appwidget_positions.items, point_radius);
-            circle_prog.render(point_buf, &.{.{ .float3 = .{ 0.0, 1.0, 1.0 } }}, &.{}, sphmath.Transform.identity);
-        }
-
-        {
-            var appwidget_positions = std.ArrayList(sphmath.Vec2).init(alloc);
-            defer appwidget_positions.deinit();
-            for (graph.nodes, graph.positions) |node, pos| {
-                if (std.mem.eql(u8, node.name, "gui.zig.Widget")) {
-                    try appwidget_positions.append(pos);
-                }
-            }
-
-            try updateNodeBuffer(alloc, &point_buf, appwidget_positions.items, point_radius);
-            circle_prog.render(point_buf, &.{.{ .float3 = .{ 1.0, 0.0, 1.0 } }}, &.{}, sphmath.Transform.identity);
-        }
-
-        {
-            var appwidget_positions = std.ArrayList(sphmath.Vec2).init(alloc);
-            defer appwidget_positions.deinit();
-            for (graph.nodes, graph.positions) |node, pos| {
-                if (std.mem.startsWith(u8, node.name, "color_picker.zig")) {
-                    try appwidget_positions.append(pos);
-                }
-            }
-
-            try updateNodeBuffer(alloc, &point_buf, appwidget_positions.items, point_radius);
-            circle_prog.render(point_buf, &.{.{ .float3 = .{ 0.0, 0.0, 1.0 } }}, &.{}, sphmath.Transform.identity);
-        }
-
-        {
-            var appwidget_positions = std.ArrayList(sphmath.Vec2).init(alloc);
-            defer appwidget_positions.deinit();
-            for (graph.nodes, graph.positions) |node, pos| {
-                if (std.mem.eql(u8, node.name, "color_picker.zig")) {
-                    try appwidget_positions.append(pos);
-                }
-            }
-
-            try updateNodeBuffer(alloc, &point_buf, appwidget_positions.items, point_radius);
-            circle_prog.render(point_buf, &.{.{ .float3 = .{ 0.0, 1.0, 0.0 } }}, &.{}, sphmath.Transform.identity);
-        }
-
-        {
-            var appwidget_positions = std.ArrayList(sphmath.Vec2).init(alloc);
-            defer appwidget_positions.deinit();
-            for (graph.nodes, graph.positions) |node, pos| {
-                if (std.mem.startsWith(u8, node.name, "gui.zig.InputState")) {
-                    try appwidget_positions.append(pos);
-                }
-            }
-
-            try updateNodeBuffer(alloc, &point_buf, appwidget_positions.items, point_radius);
-            circle_prog.render(point_buf, &.{.{ .float3 = .{ 1.0, 1.0, 0.0 } }}, &.{}, sphmath.Transform.identity);
-        }
-
-        {
-            var appwidget_positions = std.ArrayList(sphmath.Vec2).init(alloc);
-            defer appwidget_positions.deinit();
-            for (graph.nodes, graph.positions) |node, pos| {
-                if (std.mem.eql(u8, node.name, "gui.zig.InputState")) {
-                    try appwidget_positions.append(pos);
-                }
-            }
-
-            try updateNodeBuffer(alloc, &point_buf, appwidget_positions.items, point_radius);
-            circle_prog.render(point_buf, &.{.{ .float3 = .{ 1.0, 1.0, 0.5 } }}, &.{}, sphmath.Transform.identity);
-        }
-
         input_state.startFrame();
         while (glfw.queue.readItem()) |action| {
             try input_state.pushInput(alloc, action);
         }
 
-        try stack_widget.update(.{ .width = 300, .height = 800 });
+        try stack_widget.update(.{ .width = sidebar_width, .height = window_height });
         const stack_widget_size = stack_widget.getSize();
 
-        const property_widget_bounds = sphui.PixelBBox{
+        const stack_widget_bounds = sphui.PixelBBox{
             .top = 0,
             .left = 0,
             .right = stack_widget_size.width,
             .bottom = stack_widget_size.height,
         };
 
-        const action = stack_widget.setInputState(property_widget_bounds, property_widget_bounds, input_state);
+        if (!stack_widget_bounds.containsMousePos(input_state.mouse_pos) and !stack_widget_bounds.containsOptMousePos(input_state.mouse_down_location)) {
+            var mouse_pos_rel_graph = input_state.mouse_pos;
+            mouse_pos_rel_graph.x -= @floatFromInt(sidebar_width);
+            selected_node = findItemUnderCursor(positions, mouse_pos_rel_graph, window_width - sidebar_width, window_height);
+        }
+
+        gl.glViewport(0, 0, window_width, window_height);
+
+        const action = stack_widget.setInputState(stack_widget_bounds, stack_widget_bounds, input_state);
         stack_widget.render(.{ .top = 0, .left = 0, .right = stack_widget_size.width, .bottom = stack_widget_size.height }, .{
             .top = 0,
             .left = 0,
-            .right = 800,
-            .bottom = 800,
+            .right = window_width,
+            .bottom = window_height,
         });
 
         if (action.action) |a| {
@@ -815,9 +698,6 @@ pub fn main() !void {
                 .change_parent_pull_multiplier => |f| {
                     graph.parent_pull_multiplier = f;
                 },
-                .change_push_offs => |f| {
-                    graph.push_offs = @max(0.01, f);
-                },
                 .change_point_radius => |f| {
                     point_radius = @max(0.00001, f);
                 },
@@ -832,12 +712,6 @@ pub fn main() !void {
                 },
             }
         }
-
-        const item_under_cursor = findItemUnderCursor(graph, input_state.mouse_pos, window_width, window_height);
-        selected_node = Db.NodeId{ .value = item_under_cursor };
-
-        try updateNodeBuffer(alloc, &point_buf, &.{graph.positions[item_under_cursor]}, point_radius);
-        circle_prog.render(point_buf, &.{.{ .float3 = .{ 0.0, 1.0, 1.0 } }}, &.{}, sphmath.Transform.identity);
 
         glfw.swapBuffers();
     }
