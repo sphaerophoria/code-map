@@ -16,7 +16,7 @@ const NodeData = union(enum) {
     },
     filesystem: []const u8,
 
-    fn deinit(self: *NodeData, alloc: Allocator) void {
+    pub fn deinit(self: *NodeData, alloc: Allocator) void {
         switch (self.*) {
             .within_file => |d| {
                 alloc.free(d.path);
@@ -24,6 +24,27 @@ const NodeData = union(enum) {
             .filesystem => |p| {
                 alloc.free(p);
             },
+        }
+    }
+
+    pub fn clone(self: NodeData, alloc: Allocator) !NodeData {
+        switch(self) {
+            .within_file => |d| {
+                const path = try alloc.dupe(u8, d.path);
+                errdefer alloc.free(path);
+
+                return .{
+                    .within_file = .{
+                        .path = path,
+                        .ident_range = d.ident_range,
+                        .range = d.range,
+                    },
+                };
+
+            },
+            .filesystem => |p| {
+                return .{ .filesystem = try alloc.dupe(u8, p) };
+            }
         }
     }
 
@@ -65,15 +86,58 @@ pub const Node = struct {
     parent: ?NodeId,
     data: NodeData,
     referenced_by: std.ArrayListUnmanaged(NodeId) = .{},
+
+    pub fn deinit(self: *Node, alloc: Allocator) void {
+        alloc.free(self.name);
+        self.referenced_by.deinit(alloc);
+        self.data.deinit(alloc);
+    }
+
+    pub fn clone(self: Node, alloc: Allocator) !Node {
+        const name = try alloc.dupe(u8, self.name);
+        errdefer alloc.free(name);
+
+        var data = try self.data.clone(alloc);
+        errdefer data.deinit(alloc);
+
+        const referenced_by = try self.referenced_by.clone(alloc);
+
+        return .{
+            .name = name,
+            .parent = self.parent,
+            .data = data,
+            .referenced_by = referenced_by,
+        };
+
+    }
 };
 
 nodes: std.ArrayListUnmanaged(Node) = .{},
 
+pub fn load(alloc: Allocator, savedata: []const Node) !Db {
+    var nodes = std.ArrayListUnmanaged(Node){};
+    errdefer {
+        for (nodes.items) |*node| {
+            node.deinit(alloc);
+        }
+        nodes.deinit(alloc);
+    }
+
+    for (savedata) |node| {
+        var cloned = try node.clone(alloc);
+        errdefer cloned.deinit(alloc);
+
+        try nodes.append(alloc, cloned);
+    }
+
+    return .{
+        .nodes = nodes,
+    };
+}
+
 pub fn deinit(self: *Db, alloc: Allocator) void {
     for (self.nodes.items) |*node| {
-        alloc.free(node.name);
-        node.referenced_by.deinit(alloc);
-        node.data.deinit(alloc);
+        node.deinit(alloc);
     }
     self.nodes.deinit(alloc);
 }

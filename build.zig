@@ -1,6 +1,15 @@
 const std = @import("std");
 
+fn installArtifactWithCheck(b: *std.Build, artifact: *std.Build.Step.Compile, check_step: *std.Build.Step) void {
+    const duped = b.allocator.create(std.Build.Step.Compile) catch unreachable;
+    duped.* = artifact.*;
+    check_step.dependOn(&duped.step);
+    b.installArtifact(artifact);
+}
+
 pub fn build(b: *std.Build) void {
+    const check_step = b.step("check", "");
+
     const target = b.standardTargetOptions(.{});
     const opt = b.standardOptimizeOption(.{});
     const test_step = b.step("test", "");
@@ -36,7 +45,7 @@ pub fn build(b: *std.Build) void {
     exe.addIncludePath(treesitter.path("lib/include"));
     exe.addIncludePath(treesitter.path("lib/src"));
     exe.linkLibC();
-    b.installArtifact(exe);
+    installArtifactWithCheck(b, exe, check_step);
 
     const ut = b.addTest(.{
         .name = "code-map-test",
@@ -61,5 +70,5 @@ pub fn build(b: *std.Build) void {
     vis.linkSystemLibrary("GL");
     vis.linkLibC();
 
-    b.installArtifact(vis);
+    installArtifactWithCheck(b, vis, check_step);
 }
