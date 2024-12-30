@@ -28,6 +28,37 @@ fn cursorPositionCallbackGlfw(window: ?*glfwb.GLFWwindow, xpos: f64, ypos: f64) 
     };
 }
 
+fn keyCallbackGlfw(window: ?*glfwb.GLFWwindow, key: c_int, _: c_int, action: c_int, modifiers: c_int) callconv(.C) void {
+    if (action != glfwb.GLFW_PRESS) {
+        return;
+    }
+
+    const glfw: *Glfw = @ptrCast(@alignCast(glfwb.glfwGetWindowUserPointer(window)));
+
+    const key_char: sphui.Key = switch (key) {
+        glfwb.GLFW_KEY_A...glfwb.GLFW_KEY_Z => blk: {
+            const base_char: u8 = if (modifiers & glfwb.GLFW_MOD_SHIFT != 0) 'A' else 'a';
+            break :blk .{ .ascii = @intCast(key - glfwb.GLFW_KEY_A + base_char) };
+        },
+        glfwb.GLFW_KEY_COMMA...glfwb.GLFW_KEY_9 => .{ .ascii = @intCast(key - glfwb.GLFW_KEY_COMMA + ',') },
+        glfwb.GLFW_KEY_SPACE => .{ .ascii = ' ' },
+        glfwb.GLFW_KEY_LEFT => .left_arrow,
+        glfwb.GLFW_KEY_RIGHT => .right_arrow,
+        glfwb.GLFW_KEY_BACKSPACE => .backspace,
+        glfwb.GLFW_KEY_DELETE => .delete,
+        else => return,
+    };
+
+    glfw.queue.writeItem(.{
+        .key_down = .{
+            .key = key_char,
+            .ctrl = (modifiers & glfwb.GLFW_MOD_CONTROL) != 0,
+        },
+    }) catch |e| {
+        std.debug.print("Failed to write key press: {s}", .{@errorName(e)});
+    };
+}
+
 fn mouseButtonCallbackGlfw(window: ?*glfwb.GLFWwindow, button: c_int, action: c_int, _: c_int) callconv(.C) void {
     const glfw: *Glfw = @ptrCast(@alignCast(glfwb.glfwGetWindowUserPointer(window)));
     const is_down = action == glfwb.GLFW_PRESS;
@@ -80,6 +111,7 @@ const Glfw = struct {
 
         _ = glfwb.glfwSetCursorPosCallback(window, cursorPositionCallbackGlfw);
         _ = glfwb.glfwSetMouseButtonCallback(window, mouseButtonCallbackGlfw);
+        _ = glfwb.glfwSetKeyCallback(window, keyCallbackGlfw);
 
         glfwb.glfwMakeContextCurrent(window);
         glfwb.glfwSwapInterval(1);
@@ -116,10 +148,11 @@ const Glfw = struct {
 
 pub const constant_color_shader =
     \\#version 330
+    \\in vec2 uv;
     \\out vec4 fragment;
     \\void main()
     \\{
-    \\    fragment = vec4(1.0, 1.0, 1.0, 0.01);
+    \\    fragment = vec4(1.0, 1.0, 1.0, uv.x * 0.001);
     \\}
 ;
 
@@ -144,7 +177,7 @@ pub const circle_shader =
     \\}
 ;
 
-fn appendLinePointsToBuf(buf: *std.ArrayList(sphrender.PlaneRenderProgram.Buffer.BufferPoint), a: Vec2, b: Vec2, line_width: f32) !void {
+fn appendLinePointsToBuf(buf: *std.ArrayList(sphrender.PlaneRenderProgram.Buffer.BufferPoint), a: Vec2, b: Vec2, line_width: f32, weight: f32) !void {
     const ab = b - a;
     const perp = sphmath.normalize(Vec2{ -ab[1], ab[0] });
 
@@ -155,17 +188,17 @@ fn appendLinePointsToBuf(buf: *std.ArrayList(sphrender.PlaneRenderProgram.Buffer
     const b2 = b - perp * @as(Vec2, @splat(half_line_width));
 
     try buf.appendSlice(&.{
-        .{ .clip_x = a1[0], .clip_y = a1[1], .uv_x = 0, .uv_y = 0 },
-        .{ .clip_x = b1[0], .clip_y = b1[1], .uv_x = 0, .uv_y = 0 },
-        .{ .clip_x = a2[0], .clip_y = a2[1], .uv_x = 0, .uv_y = 0 },
+        .{ .clip_x = a1[0], .clip_y = a1[1], .uv_x = weight, .uv_y = 0 },
+        .{ .clip_x = b1[0], .clip_y = b1[1], .uv_x = weight, .uv_y = 0 },
+        .{ .clip_x = a2[0], .clip_y = a2[1], .uv_x = weight, .uv_y = 0 },
 
-        .{ .clip_x = a2[0], .clip_y = a2[1], .uv_x = 0, .uv_y = 0 },
-        .{ .clip_x = b1[0], .clip_y = b1[1], .uv_x = 0, .uv_y = 0 },
-        .{ .clip_x = b2[0], .clip_y = b2[1], .uv_x = 0, .uv_y = 0 },
+        .{ .clip_x = a2[0], .clip_y = a2[1], .uv_x = weight, .uv_y = 0 },
+        .{ .clip_x = b1[0], .clip_y = b1[1], .uv_x = weight, .uv_y = 0 },
+        .{ .clip_x = b2[0], .clip_y = b2[1], .uv_x = weight, .uv_y = 0 },
     });
 }
 
-fn updateLineBuffer(alloc: Allocator, buf: *sphrender.PlaneRenderProgram.Buffer, db: Db, positions: Db.ExtraData(Vec2), line_width: f32) !void {
+fn updateLineBuffer(alloc: Allocator, buf: *sphrender.PlaneRenderProgram.Buffer, db: Db, positions: Db.ExtraData(Vec2), weights: Db.ExtraData(f32), line_width: f32) !void {
     var cpu_buf = std.ArrayList(sphrender.PlaneRenderProgram.Buffer.BufferPoint).init(alloc);
     defer cpu_buf.deinit();
 
@@ -175,14 +208,14 @@ fn updateLineBuffer(alloc: Allocator, buf: *sphrender.PlaneRenderProgram.Buffer,
         const a = positions.get(node_id);
         for (node.referenced_by.items) |ref_id| {
             const b = positions.get(ref_id);
-            try appendLinePointsToBuf(&cpu_buf, a, b, line_width);
+            try appendLinePointsToBuf(&cpu_buf, a, b, line_width, @max(weights.get(node_id), weights.get(ref_id)));
         }
     }
 
     buf.updateBuffer(cpu_buf.items);
 }
 
-fn updateNodeBuffer(alloc: Allocator, buf: *sphrender.PlaneRenderProgram.Buffer, positions: Db.ExtraData(Vec2), circle_radius: f32) !void {
+fn updateNodeBuffer(alloc: Allocator, buf: *sphrender.PlaneRenderProgram.Buffer, positions: Db.ExtraData(Vec2), weights: Db.ExtraData(f32), default_circle_radius: f32) !void {
     const BufferPoint = sphrender.PlaneRenderProgram.Buffer.BufferPoint;
     var buf_points = std.ArrayList(BufferPoint).init(alloc);
     defer buf_points.deinit();
@@ -190,6 +223,9 @@ fn updateNodeBuffer(alloc: Allocator, buf: *sphrender.PlaneRenderProgram.Buffer,
     var it = positions.idIter();
     while (it.next()) |node_id| {
         const pos = positions.get(node_id);
+        const weight = weights.get(node_id);
+        const circle_radius = default_circle_radius * std.math.sqrt(weight);
+
         const tl = BufferPoint{
             .clip_x = pos[0] - circle_radius,
             .clip_y = pos[1] + circle_radius,
@@ -227,6 +263,41 @@ fn updateNodeBuffer(alloc: Allocator, buf: *sphrender.PlaneRenderProgram.Buffer,
     buf.updateBuffer(buf_points.items);
 }
 
+const NodeWeightChangeAction = struct {
+    node_id: Db.NodeId,
+
+    pub fn generate(self: NodeWeightChangeAction, val: f32) UiAction {
+        return .{
+            .change_weight = .{
+                .node_id = self.node_id,
+                .weight = val,
+            },
+        };
+    }
+};
+
+fn updateSearchMatches(alloc: Allocator, property_list: *sphui.property_list.PropertyList(UiAction), widget_factory: *sphui.widget_factory.WidgetFactory(UiAction), search_text: []const u8, db: Db, weights: *Db.ExtraData(f32)) !void {
+    property_list.clear(alloc);
+
+    if (search_text.len == 0) {
+        return;
+    }
+
+    var node_it = db.idIter();
+    while (node_it.next()) |node_id| {
+        const node = db.getNode(node_id);
+        if (std.mem.indexOf(u8, node.name, search_text) != null) {
+            const label = try widget_factory.makeLabel(node.name);
+            errdefer label.deinit(widget_factory.alloc);
+
+            const label2 = try widget_factory.makeDragFloat(weights.getPtr(node_id), NodeWeightChangeAction{ .node_id = node_id }, 0.1);
+            errdefer label2.deinit(widget_factory.alloc);
+
+            try property_list.pushWidgets(widget_factory.alloc, label, label2);
+        }
+    }
+}
+
 const Graph = struct {
     db: *const Db,
 
@@ -234,6 +305,7 @@ const Graph = struct {
         mutex: std.Thread.Mutex = .{},
         positions: Db.ExtraData(Vec2),
         shutdown: bool = false,
+        weights: Db.ExtraData(f32),
     },
 
     num_children: Db.ExtraData(u32),
@@ -248,9 +320,12 @@ const Graph = struct {
     max_push_movement: f32 = 0.117,
     max_center_movement: f32 = 0.012,
 
-    fn init(alloc: Allocator, db: *const Db) !Graph {
+    fn init(alloc: Allocator, db: *const Db, initial_weights: Db.ExtraData(f32)) !Graph {
         var positions = try db.makeExtraData(Vec2, alloc, undefined);
         errdefer positions.deinit(alloc);
+
+        const duped_weights = try initial_weights.clone(alloc);
+        errdefer duped_weights.deinit(alloc);
 
         var rng = std.Random.DefaultPrng.init(@bitCast(std.time.timestamp()));
         var rand = rng.random();
@@ -268,6 +343,7 @@ const Graph = struct {
             .db = db,
             .protected = .{
                 .positions = positions,
+                .weights = duped_weights,
             },
             .num_children = num_children,
         };
@@ -275,6 +351,7 @@ const Graph = struct {
 
     fn deinit(self: *Graph, alloc: Allocator) void {
         self.protected.positions.deinit(alloc);
+        self.protected.weights.deinit(alloc);
         self.num_children.deinit(alloc);
     }
 
@@ -283,6 +360,15 @@ const Graph = struct {
         defer self.protected.mutex.unlock();
 
         return self.protected.positions.clone(alloc);
+    }
+
+    pub fn snapshotWeights(self: *Graph, alloc: Allocator, weights: Db.ExtraData(f32)) !void {
+        self.protected.mutex.lock();
+        defer self.protected.mutex.unlock();
+
+        const duped_weights = try weights.clone(alloc);
+        self.protected.weights.deinit(alloc);
+        self.protected.weights = duped_weights;
     }
 
     pub fn run(self: *Graph, alloc: Allocator) !void {
@@ -306,17 +392,18 @@ const Graph = struct {
         self.protected.mutex.lock();
         defer self.protected.mutex.unlock();
         const positions = &self.protected.positions;
+        const weights = &self.protected.weights;
 
         var movements = try self.db.makeExtraData(Vec2, alloc, .{ 0, 0 });
         defer movements.deinit(alloc);
 
-        self.pullReferences(positions.*, &movements);
-        self.pullParents(positions.*, &movements);
-        self.pushNodes(positions.*, &movements);
+        self.pullReferences(positions.*, &movements, weights.*);
+        self.pullParents(positions.*, &movements, weights.*);
+        self.pushNodes(positions.*, &movements, weights.*);
         // Because of how we push nodes away from eachother, there is a
         // tendency for items to end up outside the bounds of the window. Pull
         // them back
-        self.pullCenter(positions.*, &movements);
+        self.pullCenter(positions.*, &movements, weights.*);
         applyMovements(positions, movements, step_speed);
 
         return !self.protected.shutdown;
@@ -338,13 +425,17 @@ const Graph = struct {
         return dir * @as(sphmath.Vec2, @splat(push_mag));
     }
 
-    fn applyBidirectionalPull(a: Db.NodeId, b: Db.NodeId, pull: Vec2, movements: *Db.ExtraData(Vec2)) void {
-        const half_pull: Vec2 = pull / sphmath.Vec2{ 2, 2 };
-        movements.getPtr(a).* += half_pull;
-        movements.getPtr(b).* -= half_pull;
+    fn applyBidirectionalPull(a: Db.NodeId, b: Db.NodeId, pull: Vec2, movements: *Db.ExtraData(Vec2), weights: Db.ExtraData(f32)) void {
+        const a_weight = weights.get(a);
+        const b_weight = weights.get(b);
+        const total_weight = a_weight + b_weight;
+        const a_pull = @as(Vec2, @splat(b_weight / total_weight)) * pull;
+        const b_pull = @as(Vec2, @splat(a_weight / total_weight)) * pull;
+        movements.getPtr(a).* += a_pull;
+        movements.getPtr(b).* -= b_pull;
     }
 
-    fn pullReferences(self: Graph, positions: Db.ExtraData(Vec2), movements: *Db.ExtraData(Vec2)) void {
+    fn pullReferences(self: Graph, positions: Db.ExtraData(Vec2), movements: *Db.ExtraData(Vec2), weights: Db.ExtraData(f32)) void {
         var node_it = self.db.idIter();
         while (node_it.next()) |node_id| {
             const node = self.db.getNode(node_id);
@@ -360,15 +451,15 @@ const Graph = struct {
                 const pull = calcPull(
                     other_pos - pos,
                     self.pull_multiplier,
-                    max_ref_pull,
+                    max_ref_pull * weights.get(node_id),
                 );
 
-                applyBidirectionalPull(node_id, ref, pull, movements);
+                applyBidirectionalPull(node_id, ref, pull, movements, weights);
             }
         }
     }
 
-    fn pullParents(self: Graph, positions: Db.ExtraData(Vec2), movements: *Db.ExtraData(Vec2)) void {
+    fn pullParents(self: Graph, positions: Db.ExtraData(Vec2), movements: *Db.ExtraData(Vec2), weights: Db.ExtraData(f32)) void {
         var id_iter = self.db.idIter();
         while (id_iter.next()) |node_id| {
             const node = self.db.getNode(node_id);
@@ -386,11 +477,11 @@ const Graph = struct {
                 self.max_parent_pull_movement / num_siblings_f,
             );
 
-            applyBidirectionalPull(node_id, parent_id, parent_pull, movements);
+            applyBidirectionalPull(node_id, parent_id, parent_pull, movements, weights);
         }
     }
 
-    fn pushNodes(self: Graph, positions: Db.ExtraData(Vec2), movements: *Db.ExtraData(Vec2)) void {
+    fn pushNodes(self: Graph, positions: Db.ExtraData(Vec2), movements: *Db.ExtraData(Vec2), weights: Db.ExtraData(f32)) void {
         const num_items_f: f32 = @floatFromInt(movements.data.len - 1);
         // If each elem can only push by max push / num items, if all items
         // push the max amount, we will move by max push
@@ -399,29 +490,32 @@ const Graph = struct {
         var a_it = positions.idIter();
         while (a_it.next()) |a_id| {
             const a_pos = positions.get(a_id);
+            const a_weight = weights.get(a_id);
 
             var b_it = positions.idIterAfter(a_id);
 
             while (b_it.next()) |b_id| {
                 const b_pos = positions.get(b_id);
+                const b_weight = weights.get(b_id);
                 const push = calcPush(
                     b_pos - a_pos,
                     self.push_multiplier,
-                    max_pair_push,
+                    max_pair_push * a_weight * b_weight,
                 );
 
                 // Backwards ids to turn the pull into a push
-                applyBidirectionalPull(b_id, a_id, push, movements);
+                applyBidirectionalPull(b_id, a_id, push, movements, weights);
             }
         }
     }
 
-    fn pullCenter(self: Graph, positions: Db.ExtraData(Vec2), movements: *Db.ExtraData(Vec2)) void {
+    fn pullCenter(self: Graph, positions: Db.ExtraData(Vec2), movements: *Db.ExtraData(Vec2), weights: Db.ExtraData(f32)) void {
         var it = positions.idIter();
         while (it.next()) |id| {
             const pos = positions.get(id);
             const movement = movements.getPtr(id);
-            const pull = calcPull(-pos, self.center_pull_multiplier, self.max_center_movement);
+            const weight = weights.get(id);
+            const pull = calcPull(-pos, self.center_pull_multiplier, self.max_center_movement * weight);
             movement.* += pull;
         }
     }
@@ -483,6 +577,25 @@ pub const UiAction = union(enum) {
     change_point_radius: f32,
     change_max_center_movement: f32,
     change_line_thickness: f32,
+    edit_search: struct {
+        notifier: sphui.textbox.TextboxNotifier,
+        pos: usize,
+        items: []const sphui.KeyEvent,
+    },
+    change_weight: struct {
+        node_id: Db.NodeId,
+        weight: f32,
+    },
+
+    pub fn makeEditSearch(notifier: sphui.textbox.TextboxNotifier, pos: usize, items: []const sphui.KeyEvent) UiAction {
+        return .{
+            .edit_search = .{
+                .notifier = notifier,
+                .pos = pos,
+                .items = items,
+            },
+        };
+    }
 
     fn makeDragGen(comptime tag: std.meta.Tag(UiAction)) fn (val: f32) UiAction {
         return struct {
@@ -532,7 +645,16 @@ pub fn main() !void {
     var db = try Db.load(alloc, db_parsed.value);
     defer db.deinit(alloc);
 
-    var graph = try Graph.init(alloc, &db);
+    var search_text: std.ArrayListUnmanaged(u8) = .{};
+    defer search_text.deinit(alloc);
+
+    var user_weights = try db.makeExtraData(f32, alloc, 1.0);
+    defer user_weights.deinit(alloc);
+
+    var weights = try user_weights.clone(alloc);
+    defer weights.deinit(alloc);
+
+    var graph = try Graph.init(alloc, &db, weights);
     defer graph.deinit(alloc);
 
     var glfw: Glfw = undefined;
@@ -551,6 +673,7 @@ pub fn main() !void {
     defer widget_factory.deinit();
 
     var input_state = sphui.InputState{};
+    defer input_state.deinit(alloc);
 
     const stack = try widget_factory.makeStack();
     const rect = try widget_factory.makeRect(.fill, .{
@@ -564,11 +687,17 @@ pub fn main() !void {
     const stack_widget = stack.asWidget();
     defer stack.deinit(widget_factory.alloc);
 
+    const layout = try widget_factory.makeLayout();
+    try stack.pushWidgetOrDeinit(widget_factory.alloc, layout.asWidget(), .{ .offset = .{ .x_offs = 0, .y_offs = 0 } });
+
     const property_list = try widget_factory.makePropertyList();
     const property_list_widget = property_list.asWidget();
-    try stack.pushWidgetOrDeinit(widget_factory.alloc, property_list_widget, .centered);
+    try layout.pushOrDeinitWidget(widget_factory.alloc, property_list_widget);
 
-    var point_radius: f32 = 0.014;
+    const search_match = try widget_factory.makePropertyList();
+    try layout.pushOrDeinitWidget(widget_factory.alloc, search_match.asWidget());
+
+    var point_radius: f32 = 0.005;
     var line_thickness: f32 = 0.005;
 
     var property_list_gen = PropertyListGen{
@@ -589,6 +718,19 @@ pub fn main() !void {
 
     try property_list_gen.add("Point radius", &point_radius, .change_point_radius);
     try property_list_gen.add("Line thickness", &line_thickness, .change_line_thickness);
+
+    {
+        const search_label = try widget_factory.makeLabel("Search");
+        errdefer search_label.deinit(widget_factory.alloc);
+
+        const search_content = try widget_factory.makeTextbox(
+            &search_text.items,
+            &UiAction.makeEditSearch,
+        );
+        errdefer search_content.deinit(widget_factory.alloc);
+
+        try property_list.pushWidgets(widget_factory.alloc, search_label, search_content);
+    }
 
     var selected_node = Db.NodeId{ .value = 0 };
     {
@@ -642,10 +784,10 @@ pub fn main() !void {
 
         gl.glViewport(sidebar_width, 0, window_width - sidebar_width, window_height);
 
-        try updateLineBuffer(alloc, &line_buf, db, positions, line_thickness);
+        try updateLineBuffer(alloc, &line_buf, db, positions, weights, line_thickness);
         line_prog.render(line_buf, &.{}, &.{}, sphmath.Transform.identity);
 
-        try updateNodeBuffer(alloc, &point_buf, positions, point_radius);
+        try updateNodeBuffer(alloc, &point_buf, positions, weights, point_radius);
         circle_prog.render(point_buf, &.{.{ .float3 = .{ 1.0, 1.0, 1.0 } }}, &.{}, sphmath.Transform.identity);
         input_state.startFrame();
         while (glfw.queue.readItem()) |action| {
@@ -678,6 +820,10 @@ pub fn main() !void {
             .bottom = window_height,
         });
 
+        if (action.wants_focus) {
+            stack_widget.setFocused(true);
+        }
+
         if (action.action) |a| {
             switch (a) {
                 .change_max_pull_movement => |f| {
@@ -709,6 +855,41 @@ pub fn main() !void {
                 },
                 .change_line_thickness => |f| {
                     line_thickness = @max(0.0, f);
+                },
+                .edit_search => |params| {
+                    try sphui.textbox.executeTextEditOnArrayList(alloc, &search_text, params.pos, params.notifier, params.items);
+                    try updateSearchMatches(alloc, search_match, widget_factory, search_text.items, db, &user_weights);
+                },
+                .change_weight => |params| {
+                    user_weights.getPtr(params.node_id).* = @max(1.000, params.weight);
+
+                    var it = user_weights.idIter();
+                    while (it.next()) |id| {
+                        weights.getPtr(id).* = user_weights.get(id);
+                    }
+
+                    it = user_weights.idIter();
+                    while (it.next()) |id| {
+
+                        // FIXME: Bidirectional
+                        const references = graph.db.getNode(id).referenced_by.items;
+
+                        var references_set = std.AutoHashMap(Db.NodeId, void).init(alloc);
+                        defer references_set.deinit();
+
+                        for (references) |ref_id| {
+                            try references_set.put(ref_id, {});
+                        }
+
+                        var refs_once = references_set.keyIterator();
+                        while (refs_once.next()) |ref_id| {
+                            // weight == 1 -> *= 1
+                            // weight == 10 -> *=  1 < val < 10
+                            weights.getPtr(ref_id.*).* *= 1 + (user_weights.get(id) - 1.0) * 0.2;
+                        }
+                    }
+
+                    try graph.snapshotWeights(alloc, weights);
                 },
             }
         }
