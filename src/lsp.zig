@@ -5,12 +5,57 @@ const coords = @import("coords.zig");
 const TextPosition = coords.TextPosition;
 const TextRange = coords.TextRange;
 
+fn getRecordedPath(alloc: Allocator, msg: anytype) ![64]u8 {
+    const Hasher = std.crypto.hash.sha2.Sha256;
+
+    var msg2 = msg;
+    if (@hasField(@TypeOf(msg), "id")) {
+        msg2.id = 0;
+    }
+
+    const msg_serialized = try std.json.stringifyAlloc(alloc, msg2, .{});
+    defer alloc.free(msg_serialized);
+
+    std.debug.print("serialized msg: {s}\n", .{msg_serialized});
+
+    var hashed: [32]u8 = undefined;
+    Hasher.hash(msg_serialized, &hashed, .{});
+    const hex = std.fmt.bytesToHex(hashed, .lower);
+    std.debug.print("Hash: {s}\n", .{hex});
+    return hex;
+}
+
 fn sendMessage(alloc: Allocator, msg: anytype, writer: anytype) !void {
     const msg_serialized = try std.json.stringifyAlloc(alloc, msg, .{});
     defer alloc.free(msg_serialized);
 
     try writer.print("Content-Length: {d}\r\n\r\n{s}", .{ msg_serialized.len, msg_serialized });
 }
+
+pub const Recorder = struct {
+    recording_dir: std.fs.Dir,
+
+    pub fn init(recording_path: []const u8) !Recorder {
+        const recording_dir = try std.fs.cwd().makeOpenPath(recording_path, .{});
+
+        return .{
+            .recording_dir = recording_dir,
+        };
+    }
+
+    pub fn deinit(self: *Recorder) void {
+        self.recording_dir.close();
+    }
+
+    pub fn openReqRecording(self: Recorder, alloc: Allocator, req: anytype) !std.fs.File {
+        const file_name = try getRecordedPath(alloc, req);
+
+        const f = try self.recording_dir.createFile(&file_name, .{
+            .exclusive = true,
+        });
+        return f;
+    }
+};
 
 // LSP messages need an ID, just keep adding 1
 const LspIdAllocator = struct {
@@ -22,54 +67,47 @@ const LspIdAllocator = struct {
     }
 };
 
-// Manage an LSP process and provide an abstraction to ask it stuff
 pub const ReferenceRetriever = struct {
-    process: std.process.Child,
+    backend: union(enum) {
+        process: ReferenceRetrieverProcessBackend,
+        recording: ReferenceRetrieverRecordingBackend,
+    },
     id_allocator: LspIdAllocator,
-    language_id: []const u8,
+    recorder: ?Recorder,
 
-    pub fn init(alloc: Allocator, argv: []const []const u8, cwd: []const u8, language_id: []const u8) !ReferenceRetriever {
-        var process = std.process.Child.init(argv, alloc);
-        process.cwd = cwd;
-        process.stdin_behavior = .Pipe;
-        process.stdout_behavior = .Pipe;
-        process.stderr_behavior = .Ignore;
-
+    pub fn init(alloc: Allocator, argv: []const []const u8, cwd: []const u8, language_id: []const u8, recorder: ?Recorder) !ReferenceRetriever {
         var id_allocator = LspIdAllocator{};
-
-        try process.spawn();
-        errdefer {
-            _ = process.kill() catch {};
-            _ = process.wait() catch {};
-        }
-
-        try sendMessage(alloc, types.InitializeMessage{
-            .id = id_allocator.next(),
-            .params = .{},
-        }, process.stdin.?.writer());
-
-        var arena = std.heap.ArenaAllocator.init(alloc);
-        defer arena.deinit();
-
-        const arena_alloc = arena.allocator();
-        var resp = try waitResponse(types.ResponseMessage, arena_alloc, process.stdout.?);
-        resp.deinit();
-
-        try sendMessage(alloc, types.InitializedNotification{
-            .method = "initialized",
-            .params = .{},
-        }, process.stdin.?.writer());
+        const backend = try ReferenceRetrieverProcessBackend.init(alloc, argv, cwd, language_id, &id_allocator);
 
         return .{
-            .process = process,
+            .backend = .{
+                .process = backend,
+            },
+            .recorder = recorder,
             .id_allocator = id_allocator,
-            .language_id = language_id,
+        };
+    }
+
+    pub fn initRecording(recording_path: []const u8) !ReferenceRetriever {
+        const id_allocator = LspIdAllocator{};
+        const backend = try ReferenceRetrieverRecordingBackend.init(recording_path);
+
+        return .{
+            .backend = .{
+                .recording = backend,
+            },
+            .recorder = null,
+            .id_allocator = id_allocator,
         };
     }
 
     pub fn deinit(self: *ReferenceRetriever) void {
-        _ = self.process.kill() catch return;
-        _ = self.process.wait() catch return;
+        switch (self.backend) {
+            .process => |*p| p.deinit(),
+            .recording => |*r| r.deinit(),
+        }
+
+        if (self.recorder) |*r| r.deinit();
     }
 
     // Helper type to avoid leaking details about the json parsing to the caller of findReferences()
@@ -122,10 +160,8 @@ pub const ReferenceRetriever = struct {
         const uri = try std.fmt.allocPrint(alloc, "file://{s}", .{abs_path});
         defer alloc.free(uri);
 
-        const writer = self.process.stdin.?.writer();
-
         const id = self.id_allocator.next();
-        try sendMessage(alloc, types.FindReferences{
+        const msg = types.FindReferences{
             .id = id,
             .params = .{
                 .textDocument = .{
@@ -139,16 +175,100 @@ pub const ReferenceRetriever = struct {
                     .includeDeclaration = false,
                 },
             },
-        }, writer);
+        };
 
-        const response = try waitResponse(types.FindReferencesResponse, alloc, self.process.stdout.?);
+        const parsed = switch (self.backend) {
+            .process => |*p| try p.findReferences(alloc, msg),
+            .recording => |*r| try r.findReferences(alloc, msg),
+        };
 
-        return ReferenceIt{
-            .parsed = response,
+        // FIXME: Call all be folded into one function
+        const recording_handle = try self.createRecordingHandle(alloc, msg);
+        defer closeRecordingHandle(recording_handle);
+        if (recording_handle) |h| {
+            try std.json.stringify(parsed.value, .{ .whitespace = .indent_2 }, h.writer());
+        }
+
+        return .{
+            .parsed = parsed,
         };
     }
 
+    fn createRecordingHandle(self: ReferenceRetriever, alloc: Allocator, msg: anytype) !?std.fs.File {
+        const r = self.recorder orelse return null;
+        return try r.openReqRecording(alloc, msg);
+    }
+
+    fn closeRecordingHandle(file: ?std.fs.File) void {
+        if (file) |f| f.close();
+    }
+
     pub fn openFile(self: *ReferenceRetriever, alloc: Allocator, abs_path: []const u8) !void {
+        switch (self.backend) {
+            .process => |*p| try p.openFile(alloc, abs_path),
+            .recording => {},
+        }
+    }
+};
+
+// Manage an LSP process and provide an abstraction to ask it stuff
+pub const ReferenceRetrieverProcessBackend = struct {
+    process: std.process.Child,
+    language_id: []const u8,
+
+    pub fn init(alloc: Allocator, argv: []const []const u8, cwd: []const u8, language_id: []const u8, id_allocator: *LspIdAllocator) !ReferenceRetrieverProcessBackend {
+        var process = std.process.Child.init(argv, alloc);
+        process.cwd = cwd;
+        process.stdin_behavior = .Pipe;
+        process.stdout_behavior = .Pipe;
+        process.stderr_behavior = .Ignore;
+
+        try process.spawn();
+        errdefer {
+            _ = process.kill() catch {};
+            _ = process.wait() catch {};
+        }
+
+        try sendMessage(alloc, types.InitializeMessage{
+            .id = id_allocator.next(),
+            .params = .{},
+        }, process.stdin.?.writer());
+
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        defer arena.deinit();
+
+        const arena_alloc = arena.allocator();
+        var resp = try waitResponse(types.ResponseMessage, arena_alloc, process.stdout.?);
+        resp.deinit();
+
+        try sendMessage(alloc, types.InitializedNotification{
+            .method = "initialized",
+            .params = .{},
+        }, process.stdin.?.writer());
+
+        return .{
+            .process = process,
+            .language_id = language_id,
+        };
+    }
+
+    pub fn deinit(self: *ReferenceRetrieverProcessBackend) void {
+        _ = self.process.kill() catch return;
+        _ = self.process.wait() catch return;
+    }
+
+    pub fn findReferences(
+        self: *ReferenceRetrieverProcessBackend,
+        alloc: Allocator,
+        msg: types.FindReferences,
+    ) !std.json.Parsed(types.FindReferencesResponse) {
+        const writer = self.process.stdin.?.writer();
+
+        try sendMessage(alloc, msg, writer);
+        return try waitResponse(types.FindReferencesResponse, alloc, self.process.stdout.?);
+    }
+
+    pub fn openFile(self: *ReferenceRetrieverProcessBackend, alloc: Allocator, abs_path: []const u8) !void {
         const uri = try std.fmt.allocPrint(alloc, "file://{s}", .{abs_path});
         defer alloc.free(uri);
 
@@ -207,6 +327,35 @@ pub const ReferenceRetriever = struct {
             return e;
         };
     }
+};
+pub const ReferenceRetrieverRecordingBackend = struct {
+    recording_dir: std.fs.Dir,
+
+    pub fn init(recording_path: []const u8) !ReferenceRetrieverRecordingBackend {
+        return .{
+            .recording_dir = try std.fs.cwd().openDir(recording_path, .{}),
+        };
+    }
+
+    pub fn deinit(self: *ReferenceRetrieverRecordingBackend) void {
+        self.recording_dir.close();
+    }
+
+    pub fn findReferences(
+        self: *ReferenceRetrieverRecordingBackend,
+        alloc: Allocator,
+        msg: types.FindReferences,
+    ) !std.json.Parsed(types.FindReferencesResponse) {
+        const recorded_path = try getRecordedPath(alloc, msg);
+        const f = try self.recording_dir.openFile(&recorded_path, .{});
+
+        var json_reader = std.json.reader(alloc, f.reader());
+        defer json_reader.deinit();
+
+        return try std.json.parseFromTokenSource(types.FindReferencesResponse, alloc, &json_reader, .{});
+    }
+
+    pub fn openFile(_: *ReferenceRetrieverRecordingBackend, _: Allocator, _: []const u8) !void {}
 };
 
 const LspHeaderParser = struct {

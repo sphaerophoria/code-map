@@ -20,6 +20,8 @@ const Config = struct {
 
 const Args = struct {
     project_root: []const u8,
+    recording_dir: ?[]const u8,
+    replay_dir: ?[]const u8,
     config: []const u8,
     it: std.process.ArgIterator,
 
@@ -27,17 +29,65 @@ const Args = struct {
         self.it.deinit();
     }
 
+    const Switch = enum {
+        @"--recording-dir",
+        @"--replay-dir",
+        @"--config",
+        @"--scan-dir",
+        @"--help",
+    };
+
     fn parse(alloc: Allocator) Args {
         var it = try std.process.argsWithAllocator(alloc);
 
         const process_name = it.next() orelse "code-map";
 
-        const config = nextArg(&it, "config", process_name);
-        const project_root = nextArg(&it, "root", process_name);
+        var recording_dir: ?[]const u8 = null;
+        var config: ?[]const u8 = null;
+        var scan_dir: ?[]const u8 = null;
+        var replay_dir: ?[]const u8 = null;
+
+        while (it.next()) |arg| {
+            const parsed = std.meta.stringToEnum(Switch, arg) orelse {
+                std.log.err("Unknown arg {s}", .{arg});
+                help(process_name);
+            };
+
+            switch (parsed) {
+                .@"--recording-dir" => {
+                    recording_dir = nextArg(&it, "recording dir", process_name);
+                },
+                .@"--scan-dir" => {
+                    scan_dir = nextArg(&it, "scan dir", process_name);
+                },
+                .@"--replay-dir" => {
+                    replay_dir = nextArg(&it, "replay dir", process_name);
+                },
+                .@"--config" => {
+                    config = nextArg(&it, "config", process_name);
+                },
+                .@"--help" => {
+                    help(process_name);
+                },
+            }
+        }
+
+        if (recording_dir != null and replay_dir != null) {
+            std.log.err("--recording-dir and --replay-dir do not work at the same time", .{});
+            help(process_name);
+        }
 
         return .{
-            .project_root = project_root,
-            .config = config,
+            .recording_dir = recording_dir,
+            .config = config orelse {
+                std.log.err("Config not provided", .{});
+                help(process_name);
+            },
+            .project_root = scan_dir orelse {
+                std.log.err("Scan dir not provided", .{});
+                help(process_name);
+            },
+            .replay_dir = replay_dir,
             .it = it,
         };
     }
@@ -65,10 +115,17 @@ const Args = struct {
     fn help(program_name: []const u8) noreturn {
         const stderr = std.io.getStdErr().writer();
         stderr.print(
-            \\USAGE: {s} <config> <root> <file>
+            \\USAGE: {s} [ARGS]
             \\
             \\Print references at file using config
             \\
+            \\Required args:
+            \\--config <config>: Language configuration (see res/config.json for zig)
+            \\--scan-dir <dir>: What are we indexing
+            \\
+            \\Optional args:
+            \\--recording-dir <dir>: Write down LSP responses here
+            \\--replay-dir <dir>: Instead of launching the LSP, use this recording
         , .{program_name}) catch {};
 
         std.process.exit(1);
@@ -277,6 +334,71 @@ fn isBlacklisted(path: []const u8, blacklisted_paths: []const []const u8) bool {
     return false;
 }
 
+fn makeProcessRetriever(alloc: Allocator, config: Config, abs_project_dir: []const u8, recording_dir: ?[]const u8) !lsp.ReferenceRetriever {
+    var recorder: ?lsp.Recorder = null;
+    if (recording_dir) |d| {
+        recorder = try lsp.Recorder.init(d);
+    }
+
+    return try lsp.ReferenceRetriever.init(alloc, config.language_server, abs_project_dir, config.language_id, recorder);
+}
+
+// Add all nodes that we care about to the database (ignoring references, those
+// require all nodes to exist before populating)
+fn populateDbNodes(alloc: Allocator, config: Config, abs_project_dir: []const u8, db: *Db, files: *std.ArrayList([]const u8), file_parser: *treesitter.FileParser) !void {
+    const project_dir = try std.fs.cwd().openDir(abs_project_dir, .{ .iterate = true });
+
+    var project_dir_it = try project_dir.walk(alloc);
+    defer project_dir_it.deinit();
+
+    var db_added_paths = std.BufSet.init(alloc);
+    defer db_added_paths.deinit();
+
+    // a/b/c.zig
+    //
+    // a
+    // b -> parent a
+    // c.zig -> parent b
+    //
+    // fn doThing() -> c.zig
+    //
+    while (try project_dir_it.next()) |entry| {
+        if (isBlacklisted(entry.path, config.blacklist_paths)) {
+            continue;
+        }
+        var component_it = DbPathComponentIt{ .path = entry.path };
+        while (component_it.next()) |res| {
+            if (!db_added_paths.contains(res.full)) {
+                // UiAction init()
+                //
+                // UiAciton.init()
+                //
+                // "a" "b" "c"
+                // a.b.c
+                try db_added_paths.insert(res.full);
+                const parent = std.fs.path.dirname(res.full) orelse "";
+                _ = try db.addFsNode(alloc, res.full, res.name, parent);
+            }
+        }
+
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const file_node_name = pathToName(entry.path, &buf);
+        const file_id = db.findNodeId(.{ .name = file_node_name }) orelse unreachable;
+        if (std.mem.endsWith(u8, entry.path, config.matched_extension)) {
+            const abs_file = blk: {
+                std.debug.print("Found path {s}\n", .{entry.path});
+                const abs_file = try project_dir.realpathAlloc(alloc, entry.path);
+                errdefer alloc.free(abs_file);
+
+                try files.append(abs_file);
+                break :blk abs_file;
+            };
+
+            try addFileToDb(alloc, file_parser, file_id, abs_file, abs_project_dir, db);
+        }
+    }
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -304,7 +426,10 @@ pub fn main() !void {
     );
     defer file_parser.deinit();
 
-    var retriever = try lsp.ReferenceRetriever.init(alloc, config.value.language_server, abs_project_dir, config.value.language_id);
+    var retriever = if (args.replay_dir) |d|
+        try lsp.ReferenceRetriever.initRecording(d)
+    else
+        try makeProcessRetriever(alloc, config.value, abs_project_dir, args.recording_dir);
     defer retriever.deinit();
 
     var db = Db{};
@@ -319,9 +444,6 @@ pub fn main() !void {
         files.deinit();
     }
 
-    var db_added_paths = std.BufSet.init(alloc);
-    defer db_added_paths.deinit();
-
     const project_dir = try std.fs.cwd().openDir(args.project_root, .{ .iterate = true });
 
     var project_dir_it = try project_dir.walk(alloc);
@@ -335,41 +457,7 @@ pub fn main() !void {
     //
     // fn doThing() -> c.zig
     //
-    while (try project_dir_it.next()) |entry| {
-        if (isBlacklisted(entry.path, config.value.blacklist_paths)) {
-            continue;
-        }
-        var component_it = DbPathComponentIt{ .path = entry.path };
-        while (component_it.next()) |res| {
-            if (!db_added_paths.contains(res.full)) {
-                // UiAction init()
-                //
-                // UiAciton.init()
-                //
-                // "a" "b" "c"
-                // a.b.c
-                try db_added_paths.insert(res.full);
-                const parent = std.fs.path.dirname(res.full) orelse "";
-                _ = try db.addFsNode(alloc, res.full, res.name, parent);
-            }
-        }
-
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const file_node_name = pathToName(entry.path, &buf);
-        const file_id = db.findNodeId(.{ .name = file_node_name }) orelse unreachable;
-        if (std.mem.endsWith(u8, entry.path, config.value.matched_extension)) {
-            const abs_file = blk: {
-                std.debug.print("Found path {s}\n", .{entry.path});
-                const abs_file = try project_dir.realpathAlloc(alloc, entry.path);
-                errdefer alloc.free(abs_file);
-
-                try files.append(abs_file);
-                break :blk abs_file;
-            };
-
-            try addFileToDb(alloc, &file_parser, file_id, abs_file, abs_project_dir, &db);
-        }
-    }
+    try populateDbNodes(alloc, config.value, abs_project_dir, &db, &files, &file_parser);
 
     var node_it = db.idIter();
     while (node_it.next()) |node_id| {
