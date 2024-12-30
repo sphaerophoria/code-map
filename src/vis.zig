@@ -37,7 +37,7 @@ fn keyCallbackGlfw(window: ?*glfwb.GLFWwindow, key: c_int, _: c_int, action: c_i
 
     const key_char: sphui.Key = switch (key) {
         glfwb.GLFW_KEY_A...glfwb.GLFW_KEY_Z => blk: {
-            const base_char: u8 = if (modifiers & glfwb.GLFW_MOD_SHIFT != 0) 'A' else  'a';
+            const base_char: u8 = if (modifiers & glfwb.GLFW_MOD_SHIFT != 0) 'A' else 'a';
             break :blk .{ .ascii = @intCast(key - glfwb.GLFW_KEY_A + base_char) };
         },
         glfwb.GLFW_KEY_COMMA...glfwb.GLFW_KEY_9 => .{ .ascii = @intCast(key - glfwb.GLFW_KEY_COMMA + ',') },
@@ -220,7 +220,6 @@ fn updateNodeBuffer(alloc: Allocator, buf: *sphrender.PlaneRenderProgram.Buffer,
     var buf_points = std.ArrayList(BufferPoint).init(alloc);
     defer buf_points.deinit();
 
-
     for (positions, weights) |pos, weight| {
         const circle_radius = default_circle_radius * weight;
 
@@ -288,14 +287,12 @@ fn updateSearchMatches(property_list: *sphui.property_list.PropertyList(UiAction
             const label = try widget_factory.makeLabel(node.name);
             errdefer label.deinit(widget_factory.alloc);
 
-
-            const label2 = try widget_factory.makeDragFloat(&weights[node_id.value], NodeWeightChangeAction { .node_id = node_id }, 0.1);
+            const label2 = try widget_factory.makeDragFloat(&weights[node_id.value], NodeWeightChangeAction{ .node_id = node_id }, 0.1);
             errdefer label2.deinit(widget_factory.alloc);
 
             try property_list.pushWidgets(widget_factory.alloc, label, label2);
         }
     }
-
 }
 
 const Graph = struct {
@@ -409,7 +406,6 @@ const Graph = struct {
         defer alloc.free(movements);
         @memset(movements, .{ 0, 0 });
 
-
         self.pullReferences(positions, movements, weights);
         self.pullParents(positions, movements, weights);
         self.pushNodes(positions, movements, weights);
@@ -503,7 +499,6 @@ const Graph = struct {
             const a_weight = weights[i];
 
             for (i + 1..movements.len) |j| {
-
                 const b_pos = positions[j];
                 const b_weight = weights[j];
                 const push = calcPush(
@@ -531,7 +526,6 @@ const Graph = struct {
             pos.*[1] = std.math.clamp(pos.*[1], -1, 1);
         }
     }
-
 };
 
 fn findItemUnderCursor(positions: []const Vec2, mouse_pos_px: sphui.MousePos, window_width: f32, window_height: f32) usize {
@@ -688,7 +682,7 @@ pub fn main() !void {
     defer stack.deinit(widget_factory.alloc);
 
     const layout = try widget_factory.makeLayout();
-    try stack.pushWidgetOrDeinit(widget_factory.alloc, layout.asWidget(), .{ .offset = .{ .x_offs = 0, .y_offs = 0 }});
+    try stack.pushWidgetOrDeinit(widget_factory.alloc, layout.asWidget(), .{ .offset = .{ .x_offs = 0, .y_offs = 0 } });
 
     const property_list = try widget_factory.makePropertyList();
     const property_list_widget = property_list.asWidget();
@@ -847,11 +841,10 @@ pub fn main() !void {
     var line_buf = line_prog.makeDefaultBuffer();
     defer line_buf.deinit();
 
-    const t = try std.Thread.spawn(.{}, Graph.run, .{&graph, alloc});
+    const t = try std.Thread.spawn(.{}, Graph.run, .{ &graph, alloc });
     _ = t;
 
     while (!glfw.closed()) {
-
         gl.glClearColor(0.0, 0.0, 0.0, 1.0);
         gl.glClear(gl.GL_COLOR_BUFFER_BIT);
 
@@ -880,7 +873,6 @@ pub fn main() !void {
             .bottom = stack_widget_size.height,
         };
 
-
         if (!stack_widget_bounds.containsMousePos(input_state.mouse_pos) and !stack_widget_bounds.containsOptMousePos(input_state.mouse_down_location)) {
             var mouse_pos_rel_graph = input_state.mouse_pos;
             mouse_pos_rel_graph.x -= @floatFromInt(sidebar_width);
@@ -890,7 +882,6 @@ pub fn main() !void {
             try updateNodeBuffer(alloc, &point_buf, &.{positions[item_under_cursor]}, &.{weights[item_under_cursor]}, point_radius);
             circle_prog.render(point_buf, &.{.{ .float3 = .{ 0.0, 1.0, 1.0 } }}, &.{}, sphmath.Transform.identity);
         }
-
 
         gl.glViewport(0, 0, window_width, window_height);
 
@@ -941,7 +932,6 @@ pub fn main() !void {
                 .edit_search => |params| {
                     try sphui.textbox.executeTextEditOnArrayList(alloc, &search_text, params.pos, params.notifier, params.items);
                     try updateSearchMatches(search_match, widget_factory, search_text.items, db, user_weights);
-
                 },
                 .change_weight_push_pow => |f| {
                     graph.weight_push_pow = f;
@@ -956,7 +946,6 @@ pub fn main() !void {
 
                         var references_set = std.AutoHashMap(Db.NodeId, void).init(alloc);
                         defer references_set.deinit();
-
 
                         for (references) |ref_id| {
                             try references_set.put(ref_id, {});
@@ -974,7 +963,6 @@ pub fn main() !void {
                 },
             }
         }
-
 
         glfw.swapBuffers();
     }

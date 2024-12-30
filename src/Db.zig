@@ -28,7 +28,7 @@ const NodeData = union(enum) {
     }
 
     pub fn clone(self: NodeData, alloc: Allocator) !NodeData {
-        switch(self) {
+        switch (self) {
             .within_file => |d| {
                 const path = try alloc.dupe(u8, d.path);
                 errdefer alloc.free(path);
@@ -40,11 +40,10 @@ const NodeData = union(enum) {
                         .range = d.range,
                     },
                 };
-
             },
             .filesystem => |p| {
                 return .{ .filesystem = try alloc.dupe(u8, p) };
-            }
+            },
         }
     }
 
@@ -108,7 +107,6 @@ pub const Node = struct {
             .data = data,
             .referenced_by = referenced_by,
         };
-
     }
 };
 
