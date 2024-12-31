@@ -16,13 +16,9 @@ fn getRecordedPath(alloc: Allocator, msg: anytype) ![64]u8 {
     const msg_serialized = try std.json.stringifyAlloc(alloc, msg2, .{});
     defer alloc.free(msg_serialized);
 
-    std.debug.print("serialized msg: {s}\n", .{msg_serialized});
-
     var hashed: [32]u8 = undefined;
     Hasher.hash(msg_serialized, &hashed, .{});
-    const hex = std.fmt.bytesToHex(hashed, .lower);
-    std.debug.print("Hash: {s}\n", .{hex});
-    return hex;
+    return std.fmt.bytesToHex(hashed, .lower);
 }
 
 fn sendMessage(alloc: Allocator, msg: anytype, writer: anytype) !void {

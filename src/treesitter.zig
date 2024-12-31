@@ -53,10 +53,9 @@ pub const AstIterator = struct {
 
     depth: i32 = 0,
 
-    pub fn deinit(self: *AstIterator, alloc: Allocator) void {
+    pub fn deinit(self: *AstIterator) void {
         bindings.ts_tree_cursor_delete(&self.cursor);
         bindings.ts_tree_delete(self.tree);
-        alloc.free(self.file_content);
     }
 
     pub const Output = struct {
@@ -270,15 +269,7 @@ pub const FileParser = struct {
         _ = std.c.dlclose(self.lang_lib);
     }
 
-    pub fn parseFile(self: *FileParser, alloc: Allocator, path: []const u8) !AstIterator {
-        const file_content = blk: {
-            const f = try std.fs.openFileAbsolute(path, .{});
-            defer f.close();
-
-            break :blk try f.readToEndAlloc(alloc, 1 << 20);
-        };
-        errdefer alloc.free(file_content);
-
+    pub fn parseFile(self: *FileParser, file_content: []const u8) !AstIterator {
         const ts_tree: *bindings.TSTree = blk: {
             break :blk bindings.ts_parser_parse_string(self.parser, null, file_content.ptr, @intCast(file_content.len));
         } orelse return error.ParseFile;

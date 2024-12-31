@@ -181,6 +181,7 @@ pub fn deinit(self: *Db, alloc: Allocator) void {
 }
 
 pub const NodeQuery = union(enum) {
+    none,
     name: []const u8,
     // FIXME: If we are querying an ID by ID it's kinda a noop,
     // which means this name is wrong
@@ -220,7 +221,7 @@ pub fn addFsNode(
     alloc: Allocator,
     path: []const u8,
     name: []const u8,
-    parent: []const u8,
+    parent: NodeQuery,
 ) !NodeId {
     const ret = NodeId{ .value = self.nodes.items.len };
     const name_duped = try alloc.dupe(u8, name);
@@ -234,7 +235,7 @@ pub fn addFsNode(
         .data = .{
             .filesystem = path_duped,
         },
-        .parent = self.nodeByName(parent),
+        .parent = self.findNodeId(parent),
     });
     return ret;
 }
@@ -243,6 +244,7 @@ pub fn findNodeId(self: Db, query: NodeQuery) ?NodeId {
     switch (query) {
         .name => |n| return self.nodeByName(n),
         .id => |id| return id,
+        .none => return null,
     }
 }
 

@@ -8,6 +8,10 @@ const Db = @import("Db.zig");
 const TextRange = coords.TextRange;
 const TextPosition = coords.TextPosition;
 
+pub const std_options = std.Options {
+    .log_level = .info,
+};
+
 const Config = struct {
     language_server: []const []const u8,
     language_id: []const u8,
@@ -126,6 +130,7 @@ const Args = struct {
             \\Optional args:
             \\--recording-dir <dir>: Write down LSP responses here
             \\--replay-dir <dir>: Instead of launching the LSP, use this recording
+            \\
         , .{program_name}) catch {};
 
         std.process.exit(1);
@@ -170,7 +175,7 @@ fn addReferencesToDb(alloc: Allocator, abs_project_dir: []const u8, node_being_r
         defer references.reset();
         while (references.next()) |ref| {
             const ref_path = uriToPath(ref.uri, abs_project_dir) orelse {
-                std.debug.print("skipping path: {s}\n", .{ref.uri});
+                std.log.debug("skipping path: {s}", .{ref.uri});
                 continue;
             };
 
@@ -198,111 +203,57 @@ fn addReferencesToDb(alloc: Allocator, abs_project_dir: []const u8, node_being_r
     }
 }
 
-fn addFileToDb(alloc: Allocator, file_parser: *treesitter.FileParser, file_parent_id: Db.NodeId, abs_file: []const u8, abs_project_dir: []const u8, db: *Db) !void {
-    var file_it = try file_parser.parseFile(alloc, abs_file);
-    defer file_it.deinit(alloc);
+const ConcatNodeName = struct {
+    name: []const u8,
+    last_split: usize,
 
-    const rel_file = abs_file[abs_project_dir.len + 1 ..];
+    fn deinit(self: ConcatNodeName, alloc: Allocator) void {
+        alloc.free(self.name);
+    }
+};
+
+fn concatNodeName(alloc: Allocator, parent_name: []const u8, trailing_components: []const []const u8) !ConcatNodeName {
+    if (trailing_components.len == 0) {
+        std.debug.assert(false);
+        return .{
+            .name = "",
+            .last_split = 0,
+        };
+    }
+
+    var path_name = std.ArrayList(u8).init(alloc);
+    defer path_name.deinit();
+
+    var last_split: usize = 0;
+    try path_name.appendSlice(parent_name);
+
+    for (0..trailing_components.len) |i| {
+        last_split = path_name.items.len;
+        try path_name.append('/');
+        try path_name.appendSlice(trailing_components[i]);
+    }
+
+    return .{
+        .name = try path_name.toOwnedSlice(),
+        .last_split = last_split,
+    };
+}
+
+fn addFileNodesToDb(alloc: Allocator, file_parser: *treesitter.FileParser, file_path: []const u8, file_parent_id: Db.NodeId, file_content: []const u8, db: *Db) !void {
+    var file_it = try file_parser.parseFile(file_content);
+    defer file_it.deinit();
 
     while (try file_it.next(alloc)) |item| {
         defer item.deinit(alloc);
 
-        var path_name = std.ArrayList(u8).init(alloc);
-        defer path_name.deinit();
-        try path_name.appendSlice(db.getNode(file_parent_id).name);
-        try path_name.append('.');
+        const concat_name = try concatNodeName(alloc, db.getNode(file_parent_id).name, item.path);
+        defer concat_name.deinit(alloc);
+        const parent_path_name = concat_name.name[0..concat_name.last_split];
 
-        // FIXME: Iterate dir as well
-        if (item.path.len > 0) {
-            try path_name.appendSlice(item.path[0]);
-            for (1..item.path.len) |i| {
-                try path_name.append('.');
-                try path_name.appendSlice(item.path[i]);
-            }
-        }
+        const parent_id = if (item.path.len <= 1) Db.NodeQuery{ .id = file_parent_id } else Db.NodeQuery{ .name = parent_path_name };
 
-        var parent_path_name = std.ArrayList(u8).init(alloc);
-        defer parent_path_name.deinit();
-        try parent_path_name.appendSlice(db.getNode(file_parent_id).name);
-        try parent_path_name.append('.');
-        if (item.path.len > 1) {
-            // FIXME: duped with above path_name
-            try parent_path_name.appendSlice(item.path[0]);
-            for (1..item.path.len - 1) |i| {
-                try parent_path_name.append('.');
-                try parent_path_name.appendSlice(item.path[i]);
-            }
-        }
-
-        const parent_id = if (item.path.len <= 1) Db.NodeQuery{ .id = file_parent_id } else Db.NodeQuery{ .name = parent_path_name.items };
-
-        _ = try db.addNode(alloc, rel_file, path_name.items, parent_id, item.ident_range, item.range);
+        _ = try db.addNode(alloc, file_path, concat_name.name, parent_id, item.ident_range, item.range);
     }
-}
-
-fn pathToName(path: []const u8, buf: []u8) []const u8 {
-    @memcpy(buf[0..path.len], path);
-    const ret = buf[0..path.len];
-
-    std.mem.replaceScalar(u8, buf, std.fs.path.sep, '.');
-    return ret;
-}
-
-const DbPathComponentIt = struct {
-    path: []const u8,
-    idx: usize = 0,
-    buf: [std.fs.max_path_bytes]u8 = undefined,
-
-    const Output = struct {
-        // a/b/c
-        full: []const u8,
-        name: []const u8,
-    };
-
-    // a
-    // a/b + "a" "b"
-    // a/b/c + ["a.b.c"]
-    fn next(self: *DbPathComponentIt) ?Output {
-        if (self.path.len <= self.idx) {
-            return null;
-        }
-
-        const idx_increment = std.mem.indexOfScalar(u8, self.path[self.idx..], std.fs.path.sep) orelse self.path.len - self.idx;
-        self.idx += idx_increment;
-        // consume the /
-        defer self.idx += 1;
-
-        const this_path = self.path[0..self.idx];
-
-        const name = pathToName(this_path, &self.buf);
-
-        return .{
-            .full = this_path,
-            .name = name,
-        };
-    }
-};
-
-test "DbPathComponentIt" {
-    var it = DbPathComponentIt{ .path = "a/b/c" };
-
-    {
-        const component = it.next() orelse return error.NoCompoenent;
-        try std.testing.expectEqualStrings("a", component.name);
-        try std.testing.expectEqualStrings("a", component.full);
-    }
-    {
-        const component = it.next() orelse return error.NoCompoenent;
-        try std.testing.expectEqualStrings("a/b", component.full);
-        try std.testing.expectEqualStrings("a.b", component.name);
-    }
-    {
-        const component = it.next() orelse return error.NoCompoenent;
-        try std.testing.expectEqualStrings("a/b/c", component.full);
-        try std.testing.expectEqualStrings("a.b.c", component.name);
-    }
-
-    try std.testing.expectEqual(null, it.next());
 }
 
 pub fn logAllReferences(db: Db) void {
@@ -343,61 +294,126 @@ fn makeProcessRetriever(alloc: Allocator, config: Config, abs_project_dir: []con
     return try lsp.ReferenceRetriever.init(alloc, config.language_server, abs_project_dir, config.language_id, recorder);
 }
 
-// Add all nodes that we care about to the database (ignoring references, those
-// require all nodes to exist before populating)
-fn populateDbNodes(alloc: Allocator, config: Config, abs_project_dir: []const u8, db: *Db, files: *std.ArrayList([]const u8), file_parser: *treesitter.FileParser) !void {
-    const project_dir = try std.fs.cwd().openDir(abs_project_dir, .{ .iterate = true });
+const DbBuilder = struct {
+    alloc: Allocator,
+    processed_files: std.ArrayListUnmanaged([]const u8) = .{},
+    file_nodes: std.StringHashMapUnmanaged(Db.NodeId) = .{},
+    config: *const Config,
+    file_parser: *treesitter.FileParser,
+    reference_retriever: *lsp.ReferenceRetriever,
+    abs_project_dir: []const u8,
+    db: *Db,
 
-    var project_dir_it = try project_dir.walk(alloc);
-    defer project_dir_it.deinit();
-
-    var db_added_paths = std.BufSet.init(alloc);
-    defer db_added_paths.deinit();
-
-    // a/b/c.zig
-    //
-    // a
-    // b -> parent a
-    // c.zig -> parent b
-    //
-    // fn doThing() -> c.zig
-    //
-    while (try project_dir_it.next()) |entry| {
-        if (isBlacklisted(entry.path, config.blacklist_paths)) {
-            continue;
+    fn deinit(self: *DbBuilder) void {
+        for (self.processed_files.items) |item| {
+            self.alloc.free(item);
         }
-        var component_it = DbPathComponentIt{ .path = entry.path };
+        self.processed_files.deinit(self.alloc);
+
+        var file_node_it = self.file_nodes.keyIterator();
+        while (file_node_it.next()) |item| {
+            self.alloc.free(item.*);
+        }
+        self.file_nodes.deinit(self.alloc);
+    }
+
+    fn addPathIfMissing(self: *DbBuilder, name: []const u8, path: []const u8) !void {
+        const gop = try self.file_nodes.getOrPut(self.alloc, path);
+
+        if (gop.found_existing) return;
+
+        errdefer _ = self.file_nodes.remove(path);
+        gop.key_ptr.* = try self.alloc.dupe(u8, path);
+
+        const parent_query: Db.NodeQuery = blk: {
+            const parent_name = std.fs.path.dirname(path) orelse break :blk .none;
+            const parent_id = self.file_nodes.get(parent_name) orelse break :blk .none;
+            break :blk .{ .id = parent_id };
+        };
+        const id = try self.db.addFsNode(self.alloc, path, name, parent_query);
+
+        gop.value_ptr.* = id;
+    }
+
+    fn addPathWithParents(self: *DbBuilder, path: []const u8) !void {
+        // Add path with parents
+        var component_it = try std.fs.path.componentIterator(path);
         while (component_it.next()) |res| {
-            if (!db_added_paths.contains(res.full)) {
-                // UiAction init()
-                //
-                // UiAciton.init()
-                //
-                // "a" "b" "c"
-                // a.b.c
-                try db_added_paths.insert(res.full);
-                const parent = std.fs.path.dirname(res.full) orelse "";
-                _ = try db.addFsNode(alloc, res.full, res.name, parent);
-            }
-        }
-
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const file_node_name = pathToName(entry.path, &buf);
-        const file_id = db.findNodeId(.{ .name = file_node_name }) orelse unreachable;
-        if (std.mem.endsWith(u8, entry.path, config.matched_extension)) {
-            const abs_file = blk: {
-                std.debug.print("Found path {s}\n", .{entry.path});
-                const abs_file = try project_dir.realpathAlloc(alloc, entry.path);
-                errdefer alloc.free(abs_file);
-
-                try files.append(abs_file);
-                break :blk abs_file;
-            };
-
-            try addFileToDb(alloc, file_parser, file_id, abs_file, abs_project_dir, db);
+            try self.addPathIfMissing(res.path, res.path);
         }
     }
-}
+
+    // Add all nodes that we care about to the database (ignoring references, those
+    // require all nodes to exist before populating)
+    fn populateDbNodes(self: *DbBuilder) !void {
+        const project_dir = try std.fs.cwd().openDir(self.abs_project_dir, .{ .iterate = true });
+
+        var project_dir_it = try project_dir.walk(self.alloc);
+        defer project_dir_it.deinit();
+
+        while (try project_dir_it.next()) |entry| {
+            if (isBlacklisted(entry.path, self.config.blacklist_paths)) {
+                continue;
+            }
+
+            if (!std.mem.endsWith(u8, entry.path, self.config.matched_extension)) {
+                continue;
+            }
+
+            try self.addPathWithParents(entry.path);
+            const file_id = self.file_nodes.get(entry.path) orelse unreachable;
+
+            const abs_file = try std.fs.path.join(self.alloc, &.{self.abs_project_dir, entry.path});
+
+            {
+                errdefer self.alloc.free(abs_file);
+                try self.processed_files.append(self.alloc, abs_file);
+            }
+
+            const f = try std.fs.openFileAbsolute(abs_file, .{});
+            defer f.close();
+
+            const file_content = try f.readToEndAlloc(self.alloc, 1 << 20);
+            defer self.alloc.free(file_content);
+
+            try addFileNodesToDb(self.alloc, self.file_parser, entry.path, file_id, file_content, self.db);
+        }
+    }
+
+    fn populateReferences(self: *DbBuilder) !void {
+        for (self.processed_files.items) |file| {
+            std.log.debug("Opening {s}", .{file});
+            try self.reference_retriever.openFile(self.alloc, file);
+        }
+
+        var node_it = self.db.idIter();
+        const num_nodes = self.db.nodes.items.len;
+
+        const stdout = std.io.getStdOut().writer();
+        try stdout.writeAll("Populating references\n");
+
+        var i: usize = 0;
+        while (node_it.next()) |id| {
+            const node = self.db.getNodePtr(id);
+            i += 1;
+            try stdout.print("\r{d}/{d}", .{i, num_nodes});
+
+            if (node.data != .within_file) continue;
+
+            const node_data = node.data.within_file;
+
+            const full_path = try std.fs.path.join(self.alloc, &.{ self.abs_project_dir, node_data.path });
+            defer self.alloc.free(full_path);
+
+            var references = try self.reference_retriever.findReferences(self.alloc, full_path, node_data.ident_range.start.line, node_data.ident_range.start.col);
+            defer references.deinit();
+
+            try addReferencesToDb(self.alloc, self.abs_project_dir, id, &references, self.db);
+        }
+        try stdout.writeAll("\n");
+    }
+};
+
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -414,7 +430,6 @@ pub fn main() !void {
 
     const config = try std.json.parseFromTokenSource(Config, alloc, &config_reader, .{});
     defer config.deinit();
-    //if (true) return error.UhOh;
 
     const abs_project_dir = try std.fs.cwd().realpathAlloc(alloc, args.project_root);
     defer alloc.free(abs_project_dir);
@@ -435,65 +450,29 @@ pub fn main() !void {
     var db = Db{};
     defer db.deinit(alloc);
 
-    // FIXME: Should be part of DB probably
-    var files = std.ArrayList([]const u8).init(alloc);
-    defer {
-        for (files.items) |item| {
-            alloc.free(item);
-        }
-        files.deinit();
-    }
-
     const project_dir = try std.fs.cwd().openDir(args.project_root, .{ .iterate = true });
 
     var project_dir_it = try project_dir.walk(alloc);
     defer project_dir_it.deinit();
 
-    // a/b/c.zig
-    //
-    // a
-    // b -> parent a
-    // c.zig -> parent b
-    //
-    // fn doThing() -> c.zig
-    //
-    try populateDbNodes(alloc, config.value, abs_project_dir, &db, &files, &file_parser);
+    var db_builder = DbBuilder {
+        .alloc = alloc,
+        .config = &config.value,
+        .file_parser = &file_parser,
+        .abs_project_dir = abs_project_dir,
+        .reference_retriever = &retriever,
+        .db = &db,
+    };
+    defer db_builder.deinit();
 
-    var node_it = db.idIter();
-    while (node_it.next()) |node_id| {
-        const node = db.getNode(node_id);
-        std.debug.print("{s}\n", .{node.name});
-    }
-    for (files.items) |file| {
-        std.debug.print("Opening {s}\n", .{file});
-        try retriever.openFile(alloc, file);
-    }
+    try db_builder.populateDbNodes();
+    try db_builder.populateReferences();
 
-    node_it = db.idIter();
-    while (node_it.next()) |id| {
-        const node = db.getNodePtr(id);
+    const db_json = try std.fs.cwd().createFile("db.json", .{});
+    defer db_json.close();
 
-        if (node.data != .within_file) continue;
+    const savedata = try db.save(alloc);
+    defer alloc.free(savedata);
 
-        const node_data = node.data.within_file;
-
-        const full_path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ abs_project_dir, node_data.path });
-        defer alloc.free(full_path);
-
-        var references = try retriever.findReferences(alloc, full_path, node_data.ident_range.start.line, node_data.ident_range.start.col);
-        defer references.deinit();
-
-        std.debug.print("references to {s} ({d}, {d}) -> ({d}, {d})\n", .{ full_path, node_data.range.start.line, node_data.range.start.col, node_data.range.end.line, node_data.range.end.col });
-
-        try addReferencesToDb(alloc, abs_project_dir, id, &references, &db);
-
-        const db_json = try std.fs.cwd().createFile("db.json", .{});
-        defer db_json.close();
-
-        const savedata = try db.save(alloc);
-        defer alloc.free(savedata);
-
-        try std.json.stringify(savedata, .{ .whitespace = .indent_2 }, db_json.writer());
-        //logAllReferences(db);
-    }
+    try std.json.stringify(savedata, .{ .whitespace = .indent_2 }, db_json.writer());
 }
