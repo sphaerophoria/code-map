@@ -10,7 +10,7 @@ const DbBuilder = @import("DbBuilder.zig");
 const TextRange = coords.TextRange;
 const TextPosition = coords.TextPosition;
 
-pub const std_options = std.Options {
+pub const std_options = std.Options{
     .log_level = .info,
 };
 
@@ -129,17 +129,32 @@ const Args = struct {
     }
 };
 
-fn makeProcessRetriever(alloc: Allocator, config: Config, abs_project_dir: []const u8, recording_dir: ?[]const u8) !lsp.ReferenceRetriever {
-    var recorder: ?lsp.Recorder = null;
-    if (recording_dir) |d| {
-        recorder = try lsp.Recorder.init(d);
+const RecordingOption = union(enum) {
+    replay: []const u8,
+    record: []const u8,
+    none,
+};
+
+fn makeProcessRetriever(alloc: Allocator, config: Config, abs_project_dir: []const u8, recording: RecordingOption) !lsp.ReferenceRetriever {
+    if (recording == .replay) {
+        return try lsp.ReferenceRetriever.initRecording(recording.replay);
     }
 
-    return try lsp.ReferenceRetriever.init(alloc, config.language_server, abs_project_dir, config.language_id, recorder);
+    const recording_dir = if (recording == .record)
+        try lsp.Recorder.init(recording.record)
+    else
+        null;
+
+    return try lsp.ReferenceRetriever.init(
+        alloc,
+        config.language_server,
+        abs_project_dir,
+        config.language_id,
+        recording_dir,
+    );
 }
 
-
-pub fn makeFileParser(config: Config) !treesitter.FileParser {
+pub fn makeFileParser(config: *const Config) !treesitter.FileParser {
     return try treesitter.FileParser.init(
         config.treesitter_so,
         config.treesitter_init,
@@ -166,13 +181,16 @@ pub fn main() !void {
     const abs_project_dir = try std.fs.cwd().realpathAlloc(alloc, args.project_root);
     defer alloc.free(abs_project_dir);
 
-    var file_parser = try makeFileParser(config.value);
+    var file_parser = try makeFileParser(&config.value);
     defer file_parser.deinit();
 
-    var retriever = if (args.replay_dir) |d|
-        try lsp.ReferenceRetriever.initRecording(d)
-    else
-        try makeProcessRetriever(alloc, config.value, abs_project_dir, args.recording_dir);
+    const recording_option: RecordingOption = if (args.replay_dir) |d|
+        .{ .replay = d }
+    else if (args.recording_dir) |d|
+        .{ .record = d }
+    else .none;
+
+    var retriever = try makeProcessRetriever(alloc, config.value, abs_project_dir, recording_option);
     defer retriever.deinit();
 
     var db = Db{};
@@ -183,7 +201,7 @@ pub fn main() !void {
     var project_dir_it = try project_dir.walk(alloc);
     defer project_dir_it.deinit();
 
-    var db_builder = DbBuilder {
+    var db_builder = DbBuilder{
         .alloc = alloc,
         .blacklist_paths = config.value.blacklist_paths,
         .matched_extension = config.value.matched_extension,
@@ -193,6 +211,12 @@ pub fn main() !void {
         .db = &db,
     };
     defer db_builder.deinit();
+
+    //const tar_source = try DbBuilder.TarPopulatorSource.init(alloc, "");
+    //defer tar_source.deinit(alloc);
+
+    //try db_builder.populateDbNodes(tar_source);
+    //try db_builder.populateReferences();
 
     var pop_source = try DbBuilder.FsPopulatorSource.init(alloc, abs_project_dir);
     defer pop_source.deinit(alloc);

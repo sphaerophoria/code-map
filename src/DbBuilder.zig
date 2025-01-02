@@ -37,7 +37,7 @@ pub const FsPopulatorSource = struct {
     project_dir_it: std.fs.Dir.Walker,
 
     pub fn init(alloc: Allocator, abs_project_dir: []const u8) !FsPopulatorSource {
-        const buf = try alloc.alloc(u8, 1<<20);
+        const buf = try alloc.alloc(u8, 1 << 20);
         errdefer alloc.free(buf);
 
         var dir = try std.fs.cwd().openDir(abs_project_dir, .{ .iterate = true });
@@ -70,7 +70,7 @@ pub const FsPopulatorSource = struct {
         pub fn content(self: FsItem) ![]const u8 {
             var abs_file_buf: [std.fs.max_path_bytes]u8 = undefined;
 
-            const abs_path = try std.fmt.bufPrint(&abs_file_buf, "{s}{s}{s}", .{self.abs_project_dir, std.fs.path.sep_str, self.path});
+            const abs_path = try std.fmt.bufPrint(&abs_file_buf, "{s}{s}{s}", .{ self.abs_project_dir, std.fs.path.sep_str, self.path });
 
             const f = try std.fs.openFileAbsolute(abs_path, .{});
             defer f.close();
@@ -90,9 +90,71 @@ pub const FsPopulatorSource = struct {
     }
 };
 
+pub const TarPopulatorSource = struct {
+    buf_reader: IoReader,
+    tar_iter: TarIter,
+    content_buf: []u8,
+    name_buf: [std.fs.max_path_bytes]u8 = undefined,
+    link_buf: [std.fs.max_path_bytes]u8 = undefined,
+
+    const IoReader = std.io.FixedBufferStream([]const u8);
+    const TarIter = std.tar.Iterator(IoReader.Reader);
+
+    pub fn init(alloc: Allocator, tar_data: []const u8) !*TarPopulatorSource {
+        const ret = try alloc.create(TarPopulatorSource);
+        errdefer alloc.destroy(ret);
+
+        const content_buf = try alloc.alloc(u8, 1<<20);
+        errdefer alloc.free(content_buf);
+
+        ret.* = .{
+            .buf_reader = std.io.fixedBufferStream(tar_data),
+            .tar_iter = undefined,
+            .content_buf = content_buf,
+        };
+        errdefer alloc.destroy(ret.buf_reader);
+
+        ret.tar_iter = std.tar.iterator(ret.buf_reader.reader(), .{
+            .file_name_buffer = &ret.name_buf,
+            .link_name_buffer = &ret.link_buf,
+        });
+
+        return ret;
+    }
+
+    pub fn deinit(self: *TarPopulatorSource, alloc: Allocator) void {
+        alloc.destroy(self);
+    }
+
+    pub const TarItem = struct {
+        // Duplicated from file, but part of public API
+        path: []const u8,
+
+        file: TarIter.File,
+        buf: []u8,
+
+        pub fn content(self: TarItem) ![]const u8 {
+            const len = try self.file.read(self.buf);
+            return self.buf[0..len];
+        }
+    };
+
+    pub fn next(self: *TarPopulatorSource) !?TarItem {
+        const tar_item = try self.tar_iter.next() orelse return null;
+
+        return .{
+            .path = tar_item.name,
+            .file = tar_item,
+            .buf = self.content_buf,
+        };
+    }
+};
+
 // Add all nodes that we care about to the database (ignoring references, those
 // require all nodes to exist before populating)
-pub fn populateDbNodes(self: *DbBuilder, source: *FsPopulatorSource) !void {
+//
+// source should be a ...PopulatorSource
+pub fn populateDbNodes(self: *DbBuilder, source: anytype) !void {
     const project_dir = try std.fs.cwd().openDir(self.abs_project_dir, .{ .iterate = true });
 
     var project_dir_it = try project_dir.walk(self.alloc);
@@ -108,6 +170,14 @@ pub fn populateDbNodes(self: *DbBuilder, source: *FsPopulatorSource) !void {
         }
 
         try self.addPathWithParents(entry.path);
+
+        {
+            const full_path = try std.fs.path.join(self.alloc, &.{ self.abs_project_dir, entry.path });
+            errdefer self.alloc.free(full_path);
+
+            try self.processed_files.append(self.alloc, full_path);
+        }
+
         const file_id = self.file_nodes.get(entry.path) orelse unreachable;
 
         const file_content = try entry.content();
@@ -131,7 +201,7 @@ pub fn populateReferences(self: *DbBuilder) !void {
     while (node_it.next()) |id| {
         const node = self.db.getNodePtr(id);
         i += 1;
-        try stdout.print("\r{d}/{d}", .{i, num_nodes});
+        try stdout.print("\r{d}/{d}", .{ i, num_nodes });
 
         if (node.data != .within_file) continue;
 
@@ -147,7 +217,6 @@ pub fn populateReferences(self: *DbBuilder) !void {
     }
     try stdout.writeAll("\n");
 }
-
 
 fn addPathIfMissing(self: *DbBuilder, name: []const u8, path: []const u8) !void {
     const gop = try self.file_nodes.getOrPut(self.alloc, path);
@@ -322,4 +391,3 @@ fn isBlacklisted(path: []const u8, blacklisted_paths: []const []const u8) bool {
     }
     return false;
 }
-

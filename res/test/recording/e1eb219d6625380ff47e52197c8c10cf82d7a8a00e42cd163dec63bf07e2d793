@@ -1,0 +1,45 @@
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "result": [
+    {
+      "uri": "file:///home/mick/work/code-map/res/test/src/libA/a.zig",
+      "range": {
+        "start": {
+          "line": 31,
+          "character": 26
+        },
+        "end": {
+          "line": 31,
+          "character": 34
+        }
+      }
+    },
+    {
+      "uri": "file:///home/mick/work/code-map/res/test/src/libA/a.zig",
+      "range": {
+        "start": {
+          "line": 38,
+          "character": 14
+        },
+        "end": {
+          "line": 38,
+          "character": 22
+        }
+      }
+    },
+    {
+      "uri": "file:///home/mick/work/code-map/res/test/src/main.zig",
+      "range": {
+        "start": {
+          "line": 7,
+          "character": 20
+        },
+        "end": {
+          "line": 7,
+          "character": 28
+        }
+      }
+    }
+  ]
+}
