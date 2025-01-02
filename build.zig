@@ -7,6 +7,26 @@ fn installArtifactWithCheck(b: *std.Build, artifact: *std.Build.Step.Compile, ch
     b.installArtifact(artifact);
 }
 
+fn makeDbTestTarball(b: *std.Build) std.Build.LazyPath {
+    //"tar cf test.tar -C res/test src build.zig"
+    //"tar cf test.tar -C res/test recording"
+
+    const cmd = b.addSystemCommand(&.{
+        "tar",
+        "cf",
+    });
+
+    const output_path = cmd.addOutputFileArg("test.tar");
+    cmd.addArgs(&.{
+        "-C",
+    });
+
+    cmd.addDirectoryArg(b.path("res/test"));
+    cmd.addArgs(&.{"."});
+
+    return output_path;
+}
+
 pub fn build(b: *std.Build) void {
     const check_step = b.step("check", "");
 
@@ -47,12 +67,29 @@ pub fn build(b: *std.Build) void {
     exe.linkLibC();
     installArtifactWithCheck(b, exe, check_step);
 
+    const test_tar = makeDbTestTarball(b);
     const ut = b.addTest(.{
         .name = "code-map-test",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = opt,
     });
+    ut.root_module.addAnonymousImport("test_tarball", .{
+        .root_source_file = test_tar,
+    });
+    ut.root_module.addAnonymousImport("zig_so", .{
+        .root_source_file = ts_zig.getEmittedBin(),
+    });
+    ut.root_module.addAnonymousImport("zig_config", .{
+        .root_source_file = b.path("res/config.json"),
+    });
+    ut.addCSourceFile(.{
+        .file = treesitter.path("lib/src/lib.c"),
+    });
+    ut.addIncludePath(treesitter.path("lib/include"));
+    ut.addIncludePath(treesitter.path("lib/src"));
+    ut.linkLibC();
+
     const run_ut = b.addRunArtifact(ut);
     test_step.dependOn(&run_ut.step);
 

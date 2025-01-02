@@ -192,16 +192,16 @@ pub fn populateReferences(self: *DbBuilder) !void {
     }
 
     var node_it = self.db.idIter();
-    const num_nodes = self.db.nodes.items.len;
+    //const num_nodes = self.db.nodes.items.len;
 
-    const stdout = std.io.getStdOut().writer();
-    try stdout.writeAll("Populating references\n");
+    //const stdout = std.io.getStdOut().writer();
+    //try stdout.writeAll("Populating references\n");
 
     var i: usize = 0;
     while (node_it.next()) |id| {
         const node = self.db.getNodePtr(id);
         i += 1;
-        try stdout.print("\r{d}/{d}", .{ i, num_nodes });
+        //try stdout.print("\r{d}/{d}", .{ i, num_nodes });
 
         if (node.data != .within_file) continue;
 
@@ -215,7 +215,7 @@ pub fn populateReferences(self: *DbBuilder) !void {
 
         try addReferencesToDb(self.alloc, self.abs_project_dir, id, &references, self.db);
     }
-    try stdout.writeAll("\n");
+    //try stdout.writeAll("\n");
 }
 
 fn addPathIfMissing(self: *DbBuilder, name: []const u8, path: []const u8) !void {
@@ -363,23 +363,6 @@ fn addFileNodesToDb(alloc: Allocator, file_parser: *treesitter.FileParser, file_
     }
 }
 
-pub fn logAllReferences(db: Db) void {
-    var node_it = db.idIter();
-    std.debug.print("LOGGING REFERENCES\n", .{});
-    defer std.debug.print("END LOGGING REFERENCES\n", .{});
-    while (node_it.next()) |id| {
-        const node = db.getNode(id);
-        if (node.referenced_by.items.len > 0) {
-            std.debug.print("{s} is referenced by\n", .{node.name});
-            for (node.referenced_by.items) |ref_id| {
-                const ref = db.getNode(ref_id);
-                std.debug.print("   {s}\n", .{ref.name});
-            }
-            std.debug.print("\n", .{});
-        }
-    }
-}
-
 fn isBlacklisted(path: []const u8, blacklisted_paths: []const []const u8) bool {
     var component_it = try std.fs.path.componentIterator(path);
     while (component_it.next()) |comp| {
@@ -390,4 +373,114 @@ fn isBlacklisted(path: []const u8, blacklisted_paths: []const []const u8) bool {
         }
     }
     return false;
+}
+
+
+const TestFixture = struct {
+    tmp_dir: std.testing.TmpDir,
+    tmp_dir_path: []const u8,
+    file_parser: treesitter.FileParser,
+    reference_retriever: lsp.ReferenceRetriever,
+    // Referenced by file_parser, so needs a stable memory address
+    config: *std.json.Parsed(Config),
+
+    pub fn init() !TestFixture {
+        const config = try getLangConfig(std.testing.allocator);
+        errdefer config.deinit();
+
+        var tmp_dir = std.testing.tmpDir(.{ .iterate = true });
+        errdefer tmp_dir.cleanup();
+
+        try extractResources(tmp_dir.dir);
+
+        var tmp_dir_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const tmp_dir_path_stack = try std.os.getFdPath(tmp_dir.dir.fd, &tmp_dir_path_buf);
+        const tmp_dir_path = try std.testing.allocator.dupe(u8, tmp_dir_path_stack);
+
+        const file_parser = try makeTsParser(tmp_dir.dir, &config.value);
+        const reference_retriever = try makeReferenceRetriever(tmp_dir.dir);
+
+        return .{
+            .config = config,
+            .file_parser = file_parser,
+            .tmp_dir = tmp_dir,
+            .tmp_dir_path = tmp_dir_path,
+            .reference_retriever = reference_retriever,
+        };
+    }
+
+    pub fn deinit(self: *TestFixture) void {
+        self.tmp_dir.cleanup();
+        self.file_parser.deinit();
+        self.config.deinit();
+        std.testing.allocator.free(self.tmp_dir_path);
+        std.testing.allocator.destroy(self.config);
+    }
+
+    fn getLangConfig(alloc: Allocator) !*std.json.Parsed(Config) {
+        const lang_config_data = @embedFile("zig_config");
+
+        const ret = try alloc.create(std.json.Parsed(Config));
+        errdefer alloc.destroy(ret);
+
+        ret.* = try std.json.parseFromSlice(Config, alloc, lang_config_data, .{});
+
+        return ret;
+    }
+
+    fn extractResources(tmp_dir: std.fs.Dir) !void {
+        const tarball_data = @embedFile("test_tarball");
+        var fb = std.io.fixedBufferStream(tarball_data);
+        try std.tar.pipeToFileSystem(tmp_dir, fb.reader(), .{});
+    }
+
+    fn makeTsParser(tmp_dir: std.fs.Dir, config: *Config) !treesitter.FileParser {
+        const parser_so = @embedFile("zig_so");
+
+        const zig_so_file = try tmp_dir.createFile("zig.so", .{});
+        try zig_so_file.writeAll(parser_so);
+
+        var zig_so_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        @memset(&zig_so_path_buf, 0);
+
+        const zig_so_path = try std.os.getFdPath(zig_so_file.handle, &zig_so_path_buf);
+
+        const file_parser = try treesitter.FileParser.init(
+            @ptrCast(zig_so_path), // getFdPath is null termiiated due to the memset(0)
+            config.treesitter_init,
+            &config.treesitter_ruleset,
+        );
+
+        return file_parser;
+    }
+
+    fn makeReferenceRetriever(tmp_dir: std.fs.Dir) !lsp.ReferenceRetriever {
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const recording_path = try tmp_dir.realpath("recording", &path_buf);
+        return lsp.ReferenceRetriever.initRecording(recording_path);
+    }
+};
+test "sanity" {
+    var fixture = try TestFixture.init();
+    defer fixture.deinit();
+
+    var db = Db{};
+    defer db.deinit(std.testing.allocator);
+
+    var db_builder = DbBuilder{
+        .alloc = std.testing.allocator,
+        .blacklist_paths = fixture.config.value.blacklist_paths,
+        .matched_extension = fixture.config.value.matched_extension,
+        .file_parser = &fixture.file_parser,
+        .reference_retriever = &fixture.reference_retriever,
+        .abs_project_dir = fixture.tmp_dir_path,
+        .db = &db,
+    };
+    defer db_builder.deinit();
+
+    var populator_source = try FsPopulatorSource.init(std.testing.allocator, fixture.tmp_dir_path);
+    defer populator_source.deinit(std.testing.allocator);
+
+    try db_builder.populateDbNodes(&populator_source);
+    try db_builder.populateReferences();
 }

@@ -232,3 +232,7 @@ pub fn main() !void {
 
     try std.json.stringify(savedata, .{ .whitespace = .indent_2 }, db_json.writer());
 }
+
+test {
+    std.testing.refAllDeclsRecursive(@This());
+}
