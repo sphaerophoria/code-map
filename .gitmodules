@@ -1,3 +1,6 @@
+[submodule "sphimp"]
+	path = sphimp
+	url = ../sphimp
 [submodule "zls"]
 	path = zls
 	url = ../zls
