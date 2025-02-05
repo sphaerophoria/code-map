@@ -290,8 +290,6 @@ fn hsvNormToRgb(h: f32, s: f32, v: f32) sphmath.Vec3 {
     }
 }
 
-
-
 fn makeBackgroundColors(alloc: Allocator, db: *const Db, node_tree: *const NodeTree) !Db.ExtraData(sphmath.Vec3) {
     var background_colors = try db.makeExtraData(sphmath.Vec3, alloc, sphmath.Vec3{ 1.0, 1.0, 1.0 });
     errdefer background_colors.deinit(alloc);

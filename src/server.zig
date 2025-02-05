@@ -2,7 +2,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Db = @import("Db.zig");
 
-
 const VimMessage = struct {
     name: []const u8,
     line: u32,
@@ -118,7 +117,6 @@ const LocHistory = struct {
         idx: usize = 0,
         start_idx: usize,
 
-
         pub fn next(self: *SampleIt) ?[]const Db.NodeId {
             if (self.idx >= self.history.samples.items.len) return null;
             defer self.idx += 1;
@@ -126,8 +124,7 @@ const LocHistory = struct {
             const end_idx = self.history.samples.items[self.idx];
             defer self.start_idx = end_idx;
 
-            return self.history.sample_storage.items[self.start_idx - self.history.samples_start..end_idx - self.history.samples_start];
-
+            return self.history.sample_storage.items[self.start_idx - self.history.samples_start .. end_idx - self.history.samples_start];
         }
     };
 
@@ -179,12 +176,10 @@ const Server = struct {
         var socket_server = try addy.listen(.{});
         errdefer socket_server.deinit();
 
-
         return .{
             .history = history,
             .socket_server = socket_server,
         };
-
     }
 
     pub fn deinit(self: *Server) void {
@@ -225,7 +220,7 @@ const Server = struct {
             _ = try reader.readAll(msg);
             std.debug.print("message content {d}\n", .{msg});
 
-            switch(parsed_message_type) {
+            switch (parsed_message_type) {
                 .file_data => {
                     std.debug.print("Got file chunk: {d}\n", .{msg.len});
                     try incoming_file.appendSlice(msg);
@@ -240,7 +235,7 @@ const Server = struct {
                     var msg_reader = fb.reader();
                     const first = try msg_reader.readInt(u32, .little);
                     const last = try msg_reader.readInt(u32, .little);
-                    std.debug.print("Editing range: {d}-{d}", .{first, last});
+                    std.debug.print("Editing range: {d}-{d}", .{ first, last });
                     const num_lines = try msg_reader.readInt(u32, .little);
                     for (0..num_lines) |_| {
                         const line_len = try msg_reader.readInt(u32, .little);
@@ -260,40 +255,39 @@ const Server = struct {
     fn handleCursorUpdate(self: *Server, msg: []const u8) void {
         _ = self;
         _ = msg;
-            //// FIXME: Should not crash on json parse failure
-            //const message = try std.json.parseFromSliceLeaky(VimMessage, arena.allocator(), buf.items, .{});
-            //std.debug.print("got message: {any}\n", .{message});
+        //// FIXME: Should not crash on json parse failure
+        //const message = try std.json.parseFromSliceLeaky(VimMessage, arena.allocator(), buf.items, .{});
+        //std.debug.print("got message: {any}\n", .{message});
 
-            //if (message.name.len < args.root.len + 1) continue;
+        //if (message.name.len < args.root.len + 1) continue;
 
-            //if (!std.mem.startsWith(u8, message.name, args.root)) {
-            //    continue;
-            //}
-            //const rel_path = message.name[args.root.len..];
-            //if (message.line == 0) {
-            //    std.log.err("Line was not 1 indexed",.{});
-            //    continue;
-            //}
+        //if (!std.mem.startsWith(u8, message.name, args.root)) {
+        //    continue;
+        //}
+        //const rel_path = message.name[args.root.len..];
+        //if (message.line == 0) {
+        //    std.log.err("Line was not 1 indexed",.{});
+        //    continue;
+        //}
 
-            //var node_it = db.nodesContainingLoc(rel_path, .{ .line = message.line - 1, .col = message.col} );
-            //while (node_it.next()) |id| {
-            //    try history.pushNode(id);
-            //    const node = db.getNode(id);
-            //    std.debug.print("Spending time in {s}\n", .{node.name});
-            //}
-            //try history.endSample();
+        //var node_it = db.nodesContainingLoc(rel_path, .{ .line = message.line - 1, .col = message.col} );
+        //while (node_it.next()) |id| {
+        //    try history.pushNode(id);
+        //    const node = db.getNode(id);
+        //    std.debug.print("Spending time in {s}\n", .{node.name});
+        //}
+        //try history.endSample();
 
-            //var sample_it = history.sampleIt();
-            //std.debug.print("Current history\n", .{});
-            //while (sample_it.next()) |samples| {
-            //    std.debug.print("samples: {any}\n", .{samples});
-            //}
+        //var sample_it = history.sampleIt();
+        //std.debug.print("Current history\n", .{});
+        //while (sample_it.next()) |samples| {
+        //    std.debug.print("samples: {any}\n", .{samples});
+        //}
 
-            //try history.writeHistory(args.output_path);
+        //try history.writeHistory(args.output_path);
 
     }
 };
-
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};

@@ -9,13 +9,13 @@ fn lastMtime(path: []const u8) !i128 {
     return stat.mtime;
 }
 
-const ShaderProgram = sphrender.xyuvt_program.Program(struct{});
+const ShaderProgram = sphrender.xyuvt_program.Program(struct {});
 
 fn loadProgram(alloc: Allocator, shader_path: []const u8) !ShaderProgram {
     const shader_f = try std.fs.cwd().openFile(shader_path, .{});
     defer shader_f.close();
 
-    const fs = try shader_f.readToEndAllocOptions(alloc, 1<<20, null, 4, 0);
+    const fs = try shader_f.readToEndAllocOptions(alloc, 1 << 20, null, 4, 0);
     defer alloc.free(fs);
 
     return try ShaderProgram.init(fs);
