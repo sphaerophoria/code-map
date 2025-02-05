@@ -167,6 +167,58 @@ pub fn idIter(self: Db) IdIter {
     };
 }
 
+/// Allows us to store extra data that is indexed by NodeId that is not
+/// captured by the DB itself
+pub fn ExtraData(comptime T: type) type {
+    return struct {
+        data: []T,
+
+        const Self = @This();
+
+        pub fn deinit(self: Self, alloc: Allocator) void {
+            alloc.free(self.data);
+        }
+
+        pub fn clone(self: Self, alloc: Allocator) !Self {
+            const data = try alloc.dupe(T, self.data);
+            return .{
+                .data = data,
+            };
+        }
+
+        pub fn idIter(self: Self) IdIter {
+            return .{
+                .max = self.data.len,
+            };
+        }
+
+        pub fn idIterAfter(self: Self, id: NodeId) IdIter {
+            return .{
+                .idx = id.value + 1,
+                .max = self.data.len,
+            };
+        }
+
+        pub fn get(self: Self, id: NodeId) T {
+            return self.data[id.value];
+        }
+
+        pub fn getPtr(self: *Self, id: NodeId) *T {
+            return &self.data[id.value];
+        }
+    };
+}
+
+pub fn makeExtraData(self: Db, comptime T: type, alloc: Allocator, default_val: T) !ExtraData(T) {
+    const data = try alloc.alloc(T, self.nodes.items.len);
+    errdefer alloc.free(data);
+    @memset(data, default_val);
+
+    return .{
+        .data = data,
+    };
+}
+
 fn nodeByName(self: Db, name: []const u8) ?NodeId {
     for (self.nodes.items, 0..) |node, idx| {
         if (std.mem.eql(u8, node.name, name)) {

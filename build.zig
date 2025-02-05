@@ -57,9 +57,14 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const opt = b.standardOptimizeOption(.{});
     const test_step = b.step("test", "");
+    const with_zls = b.option(bool, "zls", "build custom zls") orelse true;
 
     const treesitter = b.dependency("treesitter", .{});
     const treesitter_zig = b.dependency("treesitter_zig", .{});
+    const sphui_dep = b.dependency("sphui", .{});
+    const sphmath_dep = b.dependency("sphmath", .{});
+    const sphrender_dep = b.dependency("sphrender", .{});
+    const sphwindow_dep = b.dependency("sphwindow", .{});
 
     const ts_zig = b.addSharedLibrary(.{
         .name = "treesitter_zig",
@@ -73,7 +78,9 @@ pub fn build(b: *std.Build) void {
     ts_zig.addIncludePath(treesitter_zig.path("src/tree_sitter"));
     b.installArtifact(ts_zig);
 
-    makeZls(b);
+    if (with_zls) {
+        makeZls(b);
+    }
 
     const exe = b.addExecutable(.{
         .name = "code-map",
@@ -116,4 +123,20 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(ut);
     const run_ut = b.addRunArtifact(ut);
     test_step.dependOn(&run_ut.step);
+
+    const vis = b.addExecutable(.{
+        .name = "vis",
+        .root_source_file = b.path("src/vis.zig"),
+        .target = target,
+        .optimize = opt,
+    });
+    vis.root_module.addImport("sphmath", sphmath_dep.module("sphmath"));
+    vis.root_module.addImport("sphrender", sphrender_dep.module("sphrender"));
+    vis.root_module.addImport("sphui", sphui_dep.module("sphui"));
+    vis.root_module.addImport("sphwindow", sphwindow_dep.module("sphwindow"));
+
+    vis.linkSystemLibrary("GL");
+    vis.linkLibC();
+
+    installArtifactWithCheck(b, vis, check_step);
 }

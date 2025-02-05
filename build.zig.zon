@@ -11,6 +11,18 @@
             .url = "https://github.com/tree-sitter-grammars/tree-sitter-zig/archive/refs/tags/v1.1.2.tar.gz",
             .hash = "122099c4b527a9ee3adb43ff16a1eb118f0f1d3035f9594e9f8c97d3426f9a60fb1f",
         },
+        .sphmath = .{
+            .path = "sphimp/src/sphmath",
+        },
+        .sphrender = .{
+            .path = "sphimp/src/sphrender",
+        },
+        .sphui = .{
+            .path = "sphimp/src/gui",
+        },
+        .sphwindow = .{
+            .path = "sphimp/src/sphwindow",
+        },
     },
     .paths = .{
         "build.zig",
