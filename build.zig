@@ -139,4 +139,21 @@ pub fn build(b: *std.Build) void {
     vis.linkLibC();
 
     installArtifactWithCheck(b, vis, check_step);
+
+    const sphadertoy = b.addExecutable(.{
+        .name = "sphadertoy",
+        .root_source_file = b.path("src/sphadertoy.zig"),
+        .target = target,
+        .optimize = opt,
+    });
+
+    sphadertoy.linkSystemLibrary("glfw");
+    sphadertoy.linkSystemLibrary("GL");
+    sphadertoy.linkLibC();
+    sphadertoy.root_module.addImport("sphmath", sphmath_dep.module("sphmath"));
+    sphadertoy.root_module.addImport("sphrender", sphrender_dep.module("sphrender"));
+    sphadertoy.root_module.addImport("sphui", sphui_dep.module("sphui"));
+    sphadertoy.root_module.addImport("sphwindow", sphwindow_dep.module("sphwindow"));
+
+    installArtifactWithCheck(b, sphadertoy, check_step);
 }
