@@ -65,6 +65,7 @@ pub fn build(b: *std.Build) void {
     const sphmath_dep = b.dependency("sphmath", .{});
     const sphrender_dep = b.dependency("sphrender", .{});
     const sphwindow_dep = b.dependency("sphwindow", .{});
+    const sphalloc_dep = b.dependency("sphalloc", .{});
 
     const ts_zig = b.addSharedLibrary(.{
         .name = "treesitter_zig",
@@ -134,6 +135,7 @@ pub fn build(b: *std.Build) void {
     vis.root_module.addImport("sphrender", sphrender_dep.module("sphrender"));
     vis.root_module.addImport("sphui", sphui_dep.module("sphui"));
     vis.root_module.addImport("sphwindow", sphwindow_dep.module("sphwindow"));
+    vis.root_module.addImport("sphalloc", sphalloc_dep.module("sphalloc"));
 
     vis.linkSystemLibrary("GL");
     vis.linkLibC();
@@ -154,6 +156,7 @@ pub fn build(b: *std.Build) void {
     sphadertoy.root_module.addImport("sphrender", sphrender_dep.module("sphrender"));
     sphadertoy.root_module.addImport("sphui", sphui_dep.module("sphui"));
     sphadertoy.root_module.addImport("sphwindow", sphwindow_dep.module("sphwindow"));
+    sphadertoy.root_module.addImport("sphalloc", sphalloc_dep.module("sphalloc"));
 
     installArtifactWithCheck(b, sphadertoy, check_step);
 }

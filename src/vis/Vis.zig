@@ -1,6 +1,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const sphrender = @import("sphrender");
+const sphalloc = @import("sphalloc");
+const ScratchAlloc = sphalloc.ScratchAlloc;
+const RenderAlloc = sphrender.RenderAlloc;
 const gl = sphrender.gl;
 const sphmath = @import("sphmath");
 const NodeLayout = @import("NodeLayout.zig");
@@ -40,33 +43,17 @@ line_buf: sphrender.shader_program.Buffer(LineElem),
 node_renderer: NodeRenderer,
 background_renderer: BackgroundRenderer,
 
-pub fn init(alloc: Allocator, db: *const Db) !Vis {
-    var node_tree = try NodeTree.init(alloc, db);
-    errdefer node_tree.deinit(alloc);
-
-    var interactions = try makeInteractions(alloc, db);
-    errdefer freeInteractions(&interactions, alloc);
-
-    var user_weights = try db.makeExtraData(f32, alloc, 1.0);
-    errdefer user_weights.deinit(alloc);
-
-    var weights = try user_weights.clone(alloc);
-    errdefer weights.deinit(alloc);
-
-    const line_prog = try LineProgram.init(line_vertex_shader, alpha_weighted_frag);
-    errdefer line_prog.deinit();
-
-    const line_buf = line_prog.makeBuffer(&.{});
-    errdefer line_buf.deinit();
-
-    const node_renderer = try NodeRenderer.init();
-    errdefer node_renderer.deinit();
-
-    var node_layout = try NodeLayout.init(alloc, db);
-    errdefer node_layout.deinit(alloc);
-
-    var background_renderer = try BackgroundRenderer.init(alloc, db, &node_tree);
-    errdefer background_renderer.deinit();
+pub fn init(alloc: RenderAlloc, scratch: *ScratchAlloc, db: *const Db) !Vis {
+    const gpa = alloc.heap.general();
+    var node_tree = try NodeTree.init(gpa, db);
+    const interactions = try makeInteractions(gpa, db);
+    const user_weights = try db.makeExtraData(f32, gpa, 1.0);
+    const weights = try user_weights.clone(gpa);
+    const line_prog = try LineProgram.init(alloc.gl, line_vertex_shader, alpha_weighted_frag);
+    const line_buf = try line_prog.makeBuffer(alloc.gl, &.{});
+    const node_renderer = try NodeRenderer.init(alloc.gl);
+    const node_layout = try NodeLayout.init(gpa, db);
+    const background_renderer = try BackgroundRenderer.init(alloc, scratch, db, &node_tree);
 
     return .{
         .db = db,
@@ -82,24 +69,12 @@ pub fn init(alloc: Allocator, db: *const Db) !Vis {
     };
 }
 
-pub fn deinit(self: *Vis, alloc: Allocator) void {
-    freeInteractions(&self.interactions, alloc);
-    self.node_tree.deinit(alloc);
-    self.user_weights.deinit(alloc);
-    self.weights.deinit(alloc);
-    self.background_renderer.deinit(alloc);
-    self.line_buf.deinit();
-    self.line_prog.deinit();
-    self.node_renderer.deinit();
-    self.node_layout.deinit(alloc);
-}
-
-pub fn render(self: *Vis, tmp_alloc: Allocator, positions: Db.ExtraData(Vec2)) !void {
-    try self.background_renderer.render(tmp_alloc, positions, self.db, &self.node_tree, self.voronoi_debug.getTransform(), self.render_params.dist_thresh_multiplier);
+pub fn render(self: *Vis, scratch: *ScratchAlloc, positions: Db.ExtraData(Vec2)) !void {
+    try self.background_renderer.render(scratch, positions, self.db, &self.node_tree, self.voronoi_debug.getTransform(), self.render_params.dist_thresh_multiplier);
 
     if (!self.voronoi_debug.enabled) {
-        try self.renderHighlightedConnections(tmp_alloc, positions);
-        try self.node_renderer.render(tmp_alloc, &self.star_colors, positions, self.weights, self.render_params.point_radius);
+        try self.renderHighlightedConnections(scratch, positions);
+        try self.node_renderer.render(scratch, &self.star_colors, positions, self.weights, self.render_params.point_radius);
     }
 }
 
@@ -160,9 +135,9 @@ pub fn applyUserWeights(self: *Vis) void {
     }
 }
 
-fn renderHighlightedConnections(self: *Vis, tmp_alloc: Allocator, positions: Db.ExtraData(Vec2)) !void {
+fn renderHighlightedConnections(self: *Vis, scratch: *ScratchAlloc, positions: Db.ExtraData(Vec2)) !void {
     try updateLineBuffer(
-        tmp_alloc,
+        scratch,
         &self.line_buf,
         self.star_colors,
         self.interactions,
@@ -223,7 +198,6 @@ const Interactions = Db.ExtraData(NodeInteractions);
 
 fn makeInteractions(alloc: Allocator, db: *const Db) !Interactions {
     var interactions = try db.makeExtraData(NodeInteractions, alloc, .{});
-    errdefer freeInteractions(&interactions, alloc);
 
     var it = db.idIter();
     while (it.next()) |id| {
@@ -235,15 +209,6 @@ fn makeInteractions(alloc: Allocator, db: *const Db) !Interactions {
     }
 
     return interactions;
-}
-
-fn freeInteractions(interactions: *Interactions, alloc: Allocator) void {
-    var it = interactions.idIter();
-    while (it.next()) |id| {
-        const item_interactions = interactions.getPtr(id);
-        item_interactions.deinit(alloc);
-    }
-    interactions.deinit(alloc);
 }
 
 const RenderParams = struct {
@@ -384,9 +349,13 @@ fn appendLinePointsToBuf(buf: *std.ArrayList(LineElem), a: Vec2, b: Vec2, line_w
         .{ .pos = .{ b2[0], b2[1] }, .color = color, .alpha = alpha },
     });
 }
-fn updateLineBuffer(tmp_alloc: Allocator, buf: *sphrender.shader_program.Buffer(LineElem), star_colors: StarColorAssigner, interactions: Interactions, positions: Db.ExtraData(Vec2), line_width: f32, interaction_ratio_multiplier: f32) !void {
-    var cpu_buf = std.ArrayList(LineElem).init(tmp_alloc);
-    defer cpu_buf.deinit();
+
+fn updateLineBuffer(scratch: *ScratchAlloc, buf: *sphrender.shader_program.Buffer(LineElem), star_colors: StarColorAssigner, interactions: Interactions, positions: Db.ExtraData(Vec2), line_width: f32, interaction_ratio_multiplier: f32) !void {
+    const checkpoint = scratch.checkpoint();
+    defer scratch.restore(checkpoint);
+
+    // FIXME: Boo array list
+    var cpu_buf = std.ArrayList(LineElem).init(scratch.allocator());
 
     var node_it = star_colors.idColors();
     while (node_it.next()) |item| {

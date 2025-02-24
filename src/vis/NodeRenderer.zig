@@ -1,5 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const sphalloc = @import("sphalloc");
+const ScratchAlloc = sphalloc.ScratchAlloc;
 const sphrender = @import("sphrender");
 const sphmath = @import("sphmath");
 const Db = @import("../Db.zig");
@@ -11,12 +13,9 @@ buffer: sphrender.shader_program.Buffer(StarElem),
 
 const NodeRenderer = @This();
 
-pub fn init() !NodeRenderer {
-    const program = try Program.init(star_vert_shader, star_frag_shader);
-    errdefer program.deinit();
-
-    var buffer = program.makeBuffer(&.{});
-    errdefer buffer.deinit();
+pub fn init(gl_alloc: *sphrender.GlAlloc) !NodeRenderer {
+    const program = try Program.init(gl_alloc, star_vert_shader, star_frag_shader);
+    const buffer = try program.makeBuffer(gl_alloc, &.{});
 
     return .{
         .program = program,
@@ -24,14 +23,9 @@ pub fn init() !NodeRenderer {
     };
 }
 
-pub fn deinit(self: NodeRenderer) void {
-    self.buffer.deinit();
-    self.program.deinit();
-}
-
 // FIXME: Stars is a bad name now
-pub fn render(self: *NodeRenderer, tmp_alloc: Allocator, colors: *const StarColorAssigner, positions: Db.ExtraData(Vec2), weights: Db.ExtraData(f32), point_radius: f32) !void {
-    try updateNodeBuffer(tmp_alloc, &self.buffer, positions, weights, colors, point_radius);
+pub fn render(self: *NodeRenderer, scratch: *ScratchAlloc, colors: *const StarColorAssigner, positions: Db.ExtraData(Vec2), weights: Db.ExtraData(f32), point_radius: f32) !void {
+    try updateNodeBuffer(scratch, &self.buffer, positions, weights, colors, point_radius);
     self.program.render(self.buffer, .{});
 }
 
@@ -47,9 +41,12 @@ const StarElem = packed struct {
 
 const Program = sphrender.shader_program.Program(StarElem, EmptyUniform);
 
-fn updateNodeBuffer(alloc: Allocator, buf: *sphrender.shader_program.Buffer(StarElem), positions: Db.ExtraData(Vec2), weights: Db.ExtraData(f32), star_colors: *const StarColorAssigner, default_circle_radius: f32) !void {
-    var buf_points = std.ArrayList(StarElem).init(alloc);
-    defer buf_points.deinit();
+fn updateNodeBuffer(scratch: *ScratchAlloc, buf: *sphrender.shader_program.Buffer(StarElem), positions: Db.ExtraData(Vec2), weights: Db.ExtraData(f32), star_colors: *const StarColorAssigner, default_circle_radius: f32) !void {
+    const checkpoint = scratch.checkpoint();
+    defer scratch.restore(checkpoint);
+
+    // FIXME: boo array list
+    var buf_points = std.ArrayList(StarElem).init(scratch.allocator());
 
     var it = positions.idIter();
     while (it.next()) |node_id| {

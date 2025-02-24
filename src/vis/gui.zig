@@ -1,6 +1,10 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const sphrender = @import("sphrender");
+const sphalloc = @import("sphalloc");
+const ScratchAlloc = sphalloc.ScratchAlloc;
+const RenderAlloc = sphrender.RenderAlloc;
+const GlAlloc = sphrender.GlAlloc;
 const gl = sphrender.gl;
 const sphmath = @import("sphmath");
 const Db = @import("../Db.zig");
@@ -71,41 +75,17 @@ const NodeWeightChangeAction = struct {
     }
 };
 
-fn updateSearchMatches(alloc: Allocator, property_list: *sphui.property_list.PropertyList(UiAction), widget_factory: *sphui.widget_factory.WidgetFactory(UiAction), search_text: []const u8, db: *const Db, weights: *Db.ExtraData(f32)) !void {
-    property_list.clear(alloc);
-
-    if (search_text.len == 0) {
-        return;
-    }
-
-    var node_it = db.idIter();
-    while (node_it.next()) |node_id| {
-        const node = db.getNode(node_id);
-        if (std.mem.indexOf(u8, node.name, search_text) != null) {
-            const label = try widget_factory.makeLabel(node.name);
-            errdefer label.deinit(widget_factory.alloc);
-
-            const label2 = try widget_factory.makeDragFloat(weights.getPtr(node_id), NodeWeightChangeAction{ .node_id = node_id }, 0.1);
-            errdefer label2.deinit(widget_factory.alloc);
-
-            try property_list.pushWidgets(widget_factory.alloc, label, label2);
-        }
-    }
-}
 
 const PropertyListGen = struct {
     property_list: *sphui.property_list.PropertyList(UiAction),
-    widget_factory: *sphui.widget_factory.WidgetFactory(UiAction),
+    widget_factory: sphui.widget_factory.WidgetFactory(UiAction),
     speed: f32,
 
     fn add(self: PropertyListGen, name: anytype, elem: anytype, comptime tag: std.meta.Tag(UiAction)) !void {
         const key = try self.widget_factory.makeLabel(name);
-        errdefer key.deinit(self.widget_factory.alloc);
-
         const value = try self.widget_factory.makeDragFloat(elem, &UiAction.makeDragGen(tag), self.speed);
-        errdefer value.deinit(self.widget_factory.alloc);
 
-        try self.property_list.pushWidgets(self.widget_factory.alloc, key, value);
+        try self.property_list.pushWidgets(key, value);
     }
 };
 
@@ -120,66 +100,70 @@ const SelectedNameTextRetriever = struct {
 
 pub const Gui = struct {
     runner: sphui.runner.Runner(UiAction),
-    widget_factory: *sphui.widget_factory.WidgetFactory(UiAction),
+    widget_state: *sphui.widget_factory.WidgetState(UiAction),
 
-    search_text: std.ArrayListUnmanaged(u8) = .{},
+    // FIXME: Not sure how to deal with the search text yet
+    search_text: std.ArrayList(u8),
     selected_node: Db.NodeId = Db.NodeId{ .value = 0 },
 
-    // Owned by runner
+    // NOTE: Not for the property list itself, just its contents
+    search_match_content_alloc: sphrender.RenderAlloc,
     search_match: *sphui.property_list.PropertyList(UiAction),
 
-    pub fn initPinned(self: *Gui, alloc: Allocator, tmp_alloc: Allocator, vis: *Vis, window: *Window) !void {
-        const initial_params = try initialInit(alloc);
-        const layout = initial_params.layout;
+    pub fn initPinned(self: *Gui, alloc: sphrender.RenderAlloc, scratch: *ScratchAlloc, scratch_gl: *GlAlloc, vis: *Vis, window: *Window) !void {
+        const widget_state = try sphui.widget_factory.widgetState(UiAction, alloc, scratch, scratch_gl);
+        const widget_factory = widget_state.factory(alloc);
+
+        const layout = try widget_factory.makeLayout();
+        layout.cursor.direction = .horizontal;
+
+        const runner = try widget_factory.makeRunner(layout.asWidget());
 
         self.* = .{
-            .runner = initial_params.runner,
-            .widget_factory = initial_params.widget_factory,
+            .runner = runner,
+            .widget_state = widget_state,
+            .search_text = std.ArrayList(u8).init(alloc.heap.general()),
+            .search_match_content_alloc = try alloc.makeSubAlloc("search matches"),
             .search_match = undefined,
         };
-        errdefer self.deinit(alloc);
 
         const sidebar_width = 300;
 
-        const box, const stack = blk: {
-            const stack = try self.widget_factory.makeStack();
-            errdefer stack.deinit(self.widget_factory.alloc);
+        // FIXME: Bounds here are probably wrong
+        const stack = try widget_factory.makeStack(100);
+        const box = try widget_factory.makeBox(
+            stack.asWidget(),
+            .{
+                .width = sidebar_width,
+                .height = 0,
+            },
+            .fill_height,
+        );
+        try layout.pushWidget(box);
 
-            break :blk .{
-                try self.widget_factory.makeBox(
-                    stack.asWidget(),
-                    .{
-                        .width = sidebar_width,
-                        .height = 0,
-                    },
-                    .fill_height,
-                ),
-                stack,
-            };
-        };
-        try layout.pushOrDeinitWidget(self.widget_factory.alloc, box);
-
-        const rect = try self.widget_factory.makeRect(.{
+        const rect = try widget_factory.makeRect(.{
             .r = 0.1,
             .g = 0.1,
             .b = 0.1,
             .a = 1.0,
         });
-        try stack.pushWidgetOrDeinit(self.widget_factory.alloc, rect, .fill);
+        try stack.pushWidget(rect, .fill);
 
-        const stack_layout = try self.widget_factory.makeLayout();
-        try stack.pushWidgetOrDeinit(self.widget_factory.alloc, stack_layout.asWidget(), .{ .offset = .{ .x_offs = 0, .y_offs = 0 } });
+        const stack_layout = try widget_factory.makeLayout();
+        try stack.pushWidget(stack_layout.asWidget(), .{ .offset = .{ .x_offs = 0, .y_offs = 0 } });
 
-        const property_list = try self.widget_factory.makePropertyList();
+        // FIXME: Bounds here are probably wrong
+        const property_list = try widget_factory.makePropertyList(10000);
         const property_list_widget = property_list.asWidget();
-        try stack_layout.pushOrDeinitWidget(self.widget_factory.alloc, property_list_widget);
+        try stack_layout.pushWidget(property_list_widget);
 
-        self.search_match = try self.widget_factory.makePropertyList();
-        try stack_layout.pushOrDeinitWidget(self.widget_factory.alloc, self.search_match.asWidget());
+        // FIXME: Bounds here are probably wrong
+        self.search_match = try widget_factory.makePropertyList(10000);
+        try stack_layout.pushWidget(self.search_match.asWidget());
 
         var property_list_gen = PropertyListGen{
             .property_list = property_list,
-            .widget_factory = self.widget_factory,
+            .widget_factory = widget_factory,
             .speed = 0.1,
         };
 
@@ -202,49 +186,36 @@ pub const Gui = struct {
         try property_list_gen.add("Weight propagation ratio", &vis.render_params.weight_propagation_ratio, .change_weight_propagation_ratio);
 
         {
-            const voronoi_debug_label = try self.widget_factory.makeLabel("Voronoi debug");
-            errdefer voronoi_debug_label.deinit(self.widget_factory.alloc);
+            const voronoi_debug_label = try widget_factory.makeLabel("Voronoi debug");
+            const voronoi_debug_checkbox = try widget_factory.makeCheckbox(&vis.voronoi_debug.enabled, .toggle_voronoi_debug);
 
-            const voronoi_debug_checkbox = try self.widget_factory.makeCheckbox(&vis.voronoi_debug.enabled, .toggle_voronoi_debug);
-            errdefer voronoi_debug_checkbox.deinit(self.widget_factory.alloc);
-
-            try property_list.pushWidgets(self.widget_factory.alloc, voronoi_debug_label, voronoi_debug_checkbox);
+            try property_list.pushWidgets(voronoi_debug_label, voronoi_debug_checkbox);
         }
 
         {
-            const search_label = try self.widget_factory.makeLabel("Search");
-            errdefer search_label.deinit(self.widget_factory.alloc);
+            const search_label = try widget_factory.makeLabel("Search");
 
-            const search_content = try self.widget_factory.makeTextbox(
+            const search_content = try widget_factory.makeTextbox(
                 &self.search_text.items,
                 &UiAction.makeEditSearch,
             );
-            errdefer search_content.deinit(self.widget_factory.alloc);
 
-            try property_list.pushWidgets(self.widget_factory.alloc, search_label, search_content);
+            try property_list.pushWidgets(search_label, search_content);
         }
 
         {
-            const key = try self.widget_factory.makeLabel("Name");
-            errdefer key.deinit(self.widget_factory.alloc);
+            const key = try widget_factory.makeLabel("Name");
 
-            const value = try self.widget_factory.makeLabel(SelectedNameTextRetriever{
+            const value = try widget_factory.makeLabel(SelectedNameTextRetriever{
                 .db = vis.db,
                 .selected_node = &self.selected_node,
             });
-            errdefer value.deinit(self.widget_factory.alloc);
 
-            try property_list.pushWidgets(self.widget_factory.alloc, key, value);
+            try property_list.pushWidgets(key, value);
         }
 
-        const vis_widget = try VisWidget.create(self.widget_factory.alloc, tmp_alloc, vis, window);
-        try layout.pushOrDeinitWidget(self.widget_factory.alloc, vis_widget);
-    }
-
-    pub fn deinit(self: *Gui, alloc: Allocator) void {
-        self.runner.deinit();
-        self.search_text.deinit(alloc);
-        self.widget_factory.deinit();
+        const vis_widget = try VisWidget.create(alloc.heap.general(), scratch, vis, window);
+        try layout.pushWidget(vis_widget);
     }
 
     pub fn step(self: *Gui, window: *Window) !?UiAction {
@@ -271,31 +242,33 @@ pub const Gui = struct {
         return try self.runner.step(widget_area, window_size, &window.queue);
     }
 
-    const InitialParams = struct {
-        layout: *sphui.layout.Layout(UiAction),
-        runner: sphui.runner.Runner(UiAction),
-        widget_factory: *sphui.widget_factory.WidgetFactory(UiAction),
-    };
+    fn updateSearchMatches(self: *Gui, db: *const Db, weights: *Db.ExtraData(f32)) !void {
+        self.search_match.clear();
+        try self.search_match_content_alloc.reset();
 
-    fn initialInit(alloc: Allocator) !InitialParams {
-        const widget_factory = try sphui.widget_factory.widgetFactory(UiAction, alloc);
-        errdefer widget_factory.deinit();
+        const widget_factory = self.widget_state.factory(self.search_match_content_alloc);
 
-        const layout = try widget_factory.makeLayout();
-        layout.cursor.direction = .horizontal;
+        if (self.search_text.items.len == 0) {
+            return;
+        }
 
-        var runner = try widget_factory.makeRunnerOrDeinit(layout.asWidget());
-        errdefer runner.deinit();
+        var node_it = db.idIter();
+        while (node_it.next()) |node_id| {
+            const node = db.getNode(node_id);
+            if (std.mem.indexOf(u8, node.name, self.search_text.items) != null) {
+                const label = try widget_factory.makeLabel(node.name);
+                const label2 = try widget_factory.makeDragFloat(weights.getPtr(node_id), NodeWeightChangeAction{ .node_id = node_id }, 0.1);
 
-        return .{
-            .layout = layout,
-            .runner = runner,
-            .widget_factory = widget_factory,
-        };
+                try self.search_match.pushWidgets(label, label2);
+            }
+        }
     }
 };
 
-pub fn applyGuiAction(a: UiAction, alloc: Allocator, vis: *Vis, gui: *Gui) !void {
+pub fn applyGuiAction(a: UiAction, scratch: *ScratchAlloc, vis: *Vis, gui: *Gui) !void {
+    const checkpoint = scratch.checkpoint();
+    defer scratch.restore(checkpoint);
+
     switch (a) {
         .change_max_pull_movement => |f| {
             vis.node_layout.max_pull_movement = f;
@@ -331,8 +304,9 @@ pub fn applyGuiAction(a: UiAction, alloc: Allocator, vis: *Vis, gui: *Gui) !void
             vis.render_params.line_alpha_multiplier = @max(0.0, f);
         },
         .edit_search => |params| {
-            try sphui.textbox.executeTextEditOnArrayList(alloc, &gui.search_text, params.pos, params.notifier, params.items);
-            try updateSearchMatches(alloc, gui.search_match, gui.widget_factory, gui.search_text.items, vis.db, &vis.user_weights);
+
+            try sphui.textbox.executeTextEditOnArrayList(&gui.search_text, params.pos, params.notifier, params.items);
+            try gui.updateSearchMatches(vis.db, &vis.user_weights);
         },
         .change_weight_propagation_ratio => |r| {
             vis.render_params.weight_propagation_ratio = std.math.clamp(r, 0.0, 1.0);

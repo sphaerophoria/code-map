@@ -1,4 +1,7 @@
 const std = @import("std");
+const sphalloc = @import("sphalloc");
+const Sphalloc = sphalloc.Sphalloc;
+const ScratchAlloc = sphalloc.ScratchAlloc;
 const Allocator = std.mem.Allocator;
 const sphrender = @import("sphrender");
 const sphwindow = @import("sphwindow");
@@ -11,55 +14,60 @@ fn lastMtime(path: []const u8) !i128 {
 
 const ShaderProgram = sphrender.xyuvt_program.Program(struct {});
 
-fn loadProgram(alloc: Allocator, shader_path: []const u8) !ShaderProgram {
+fn loadProgram(gl_alloc: *sphrender.GlAlloc, scratch: *ScratchAlloc, shader_path: []const u8) !ShaderProgram {
+    const checkpoint = scratch.checkpoint();
+    defer scratch.restore(checkpoint);
+
     const shader_f = try std.fs.cwd().openFile(shader_path, .{});
     defer shader_f.close();
 
-    const fs = try shader_f.readToEndAllocOptions(alloc, 1 << 20, null, 4, 0);
-    defer alloc.free(fs);
+    const fs_buf = try scratch.allocator().alloc(u8, 1 << 20);
+    const fs_len = try shader_f.readAll(fs_buf);
+    fs_buf[fs_len] = 0;
 
-    return try ShaderProgram.init(fs);
+    return try ShaderProgram.init(gl_alloc, @ptrCast(fs_buf[0..fs_len]));
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+    var tpa = sphalloc.TinyPageAllocator(100){
+        .page_allocator = std.heap.page_allocator,
+    };
 
-    const alloc = gpa.allocator();
+    var scratch = ScratchAlloc.init(try std.heap.page_allocator.alloc(u8, 10 * 1024 * 1024));
 
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+    var root_alloc: Sphalloc = undefined;
+    try root_alloc.initPinned(tpa.allocator(), "root");
+
+    var root_gl = try sphrender.GlAlloc.init(&root_alloc);
+    var render_alloc = sphrender.RenderAlloc.init(&root_alloc, &root_gl);
+
+    const args = try std.process.argsAlloc(root_alloc.arena());
 
     var window: sphwindow.Window = undefined;
     try window.initPinned("sphadertoy", 800, 800);
 
     const shader_path = args[1];
 
-    var prog = try loadProgram(alloc, shader_path);
-    defer prog.deinit();
-
-    var prog_buf = prog.makeFullScreenPlane();
-    defer prog_buf.deinit();
+    var shader_alloc = try render_alloc.makeSubAlloc("shader");
+    var prog = try loadProgram(shader_alloc.gl, &scratch, shader_path);
+    var prog_buf = try prog.makeFullScreenPlane(shader_alloc.gl);
 
     var last_mtime = try lastMtime(shader_path);
 
     while (!window.closed()) {
+        scratch.reset();
         blk: {
             const shader_mtime = lastMtime(shader_path) catch break :blk;
             if (shader_mtime != last_mtime) {
-                const new_prog = loadProgram(alloc, shader_path) catch {
-                    break :blk;
-                };
-                errdefer new_prog.deinit();
+                const new_alloc = try render_alloc.makeSubAlloc("shader");
 
-                const new_buf = new_prog.makeFullScreenPlane();
-                errdefer new_buf.deinit();
+                // FIXME: Program will be invalid if program was invalid
+                prog = try loadProgram(new_alloc.gl, &scratch, shader_path);
+                prog_buf = try prog.makeFullScreenPlane(new_alloc.gl);
 
-                prog.deinit();
-                prog_buf.deinit();
+                shader_alloc.deinit();
+                shader_alloc = new_alloc;
 
-                prog = new_prog;
-                prog_buf = new_buf;
                 last_mtime = shader_mtime;
             }
         }

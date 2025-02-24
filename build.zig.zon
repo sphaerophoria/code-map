@@ -20,6 +20,9 @@
         .sphui = .{
             .path = "sphimp/src/gui",
         },
+        .sphalloc = .{
+            .path = "sphimp/src/sphalloc",
+        },
         .sphwindow = .{
             .path = "sphimp/src/sphwindow",
         },

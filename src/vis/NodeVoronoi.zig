@@ -16,17 +16,12 @@ const num_cone_triangles = num_cone_points * 2;
 const num_cone_verts = num_cone_triangles * 3;
 const depth_radius = 2 * std.math.sqrt2;
 
-pub fn init() !NodeVornoi {
-    const program = try sphrender.compileLinkProgram(distance_field_vertex_shader, distance_field_fragment_shader);
-    errdefer gl.glDeleteProgram(program);
+pub fn init(gl_alloc: *sphrender.GlAlloc) !NodeVornoi {
+    const program = try sphrender.compileLinkProgram(gl_alloc, distance_field_vertex_shader, distance_field_fragment_shader);
 
     return .{
         .program = program,
     };
-}
-
-pub fn deinit(self: NodeVornoi) void {
-    gl.glDeleteProgram(self.program);
 }
 
 const Locs = struct {

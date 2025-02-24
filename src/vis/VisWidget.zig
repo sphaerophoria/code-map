@@ -1,6 +1,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const sphrender = @import("sphrender");
+const sphalloc = @import("sphalloc");
+const ScratchAlloc = sphalloc.ScratchAlloc;
 const gl = sphrender.gl;
 const sphmath = @import("sphmath");
 const Db = @import("../Db.zig");
@@ -13,7 +15,7 @@ const Vis = @import("Vis.zig");
 const sphwindow = @import("sphwindow");
 const Window = sphwindow.Window;
 
-tmp_alloc: Allocator,
+scratch: *ScratchAlloc,
 vis: *Vis,
 size: sphui.PixelSize = .{ .width = 0, .height = 0 },
 positions: Db.ExtraData(Vec2),
@@ -26,7 +28,6 @@ window: *Window,
 const VisWidget = @This();
 
 const widget_vtable = sphui.Widget(UiAction).VTable{
-    .deinit = VisWidget.deinit,
     .render = VisWidget.render,
     .getSize = VisWidget.getSize,
     .update = VisWidget.update,
@@ -35,12 +36,12 @@ const widget_vtable = sphui.Widget(UiAction).VTable{
     .reset = null,
 };
 
-pub fn create(alloc: Allocator, tmp_alloc: Allocator, vis: *Vis, window: *Window) !sphui.Widget(UiAction) {
-    const ctx = try alloc.create(VisWidget);
-    errdefer alloc.destroy(ctx);
+pub fn create(arena: Allocator, scratch: *ScratchAlloc, vis: *Vis, window: *Window) !sphui.Widget(UiAction) {
+    const ctx = try arena.create(VisWidget);
+    errdefer arena.destroy(ctx);
 
     ctx.* = .{
-        .tmp_alloc = tmp_alloc,
+        .scratch = scratch,
         .vis = vis,
         .positions = undefined,
         .last_time = try std.time.Instant.now(),
@@ -56,7 +57,10 @@ pub fn create(alloc: Allocator, tmp_alloc: Allocator, vis: *Vis, window: *Window
 fn update(ctx: ?*anyopaque, available_size: sphui.PixelSize) anyerror!void {
     const self: *VisWidget = @ptrCast(@alignCast(ctx));
     self.size = available_size;
-    self.positions = try self.vis.node_layout.snapshotPositions(self.tmp_alloc);
+    // Use of scratch allocator looks bad here, but the widget is guaranteed to
+    // call update every frame before the other functions, so we know that this
+    // will always be valid
+    self.positions = try self.vis.node_layout.snapshotPositions(self.scratch.allocator());
 
     const now = try std.time.Instant.now();
     self.delta_s = @floatFromInt(now.since(self.last_time));
@@ -78,7 +82,7 @@ fn render(ctx: ?*anyopaque, widget_bounds: sphui.PixelBBox, window_bounds: sphui
 
     scissor.set(centered_bounds.left, window_bounds.bottom - centered_bounds.bottom, centered_bounds.calcWidth(), centered_bounds.calcHeight());
 
-    self.vis.render(self.tmp_alloc, self.positions) catch return;
+    self.vis.render(self.scratch, self.positions) catch return;
 }
 
 fn getSize(ctx: ?*anyopaque) sphui.PixelSize {
@@ -143,11 +147,6 @@ fn centeredBounds(widget_bounds: sphui.PixelBBox) sphui.PixelBBox {
     const size = @min(width, height);
 
     return sphui.util.centerBoxInBounds(.{ .width = size, .height = size }, widget_bounds);
-}
-
-fn deinit(ctx: ?*anyopaque, alloc: Allocator) void {
-    const self: *VisWidget = @ptrCast(@alignCast(ctx));
-    alloc.destroy(self);
 }
 
 fn findClosestNode(graph_pos: Vec2, positions: Db.ExtraData(Vec2)) Db.NodeId {

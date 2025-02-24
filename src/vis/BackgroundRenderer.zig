@@ -1,7 +1,11 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const sphalloc = @import("sphalloc");
+const ScratchAlloc = sphalloc.ScratchAlloc;
 const Db = @import("../Db.zig");
 const sphmath = @import("sphmath");
+const sphrender = @import("sphrender");
+const RenderAlloc = sphrender.RenderAlloc;
 const Vec2 = sphmath.Vec2;
 const Vec3 = sphmath.Vec3;
 const NodeVoronoi = @import("NodeVoronoi.zig");
@@ -14,15 +18,10 @@ background_colors: Db.ExtraData(Vec3),
 voronoi_buf: NodeVoronoi.InstancedRenderBuffer,
 voronoi: NodeVoronoi,
 
-pub fn init(alloc: Allocator, db: *const Db, node_tree: *const NodeTree) !BackgroundRenderer {
-    var voronoi = try NodeVoronoi.init();
-    errdefer voronoi.deinit();
-
-    var voronoi_buf = try voronoi.makeConeBuf();
-    errdefer voronoi_buf.deinit();
-
-    var background_colors = try makeBackgroundColors(alloc, db, node_tree);
-    errdefer background_colors.deinit(alloc);
+pub fn init(alloc: RenderAlloc, scratch: *ScratchAlloc, db: *const Db, node_tree: *const NodeTree) !BackgroundRenderer {
+    const voronoi = try NodeVoronoi.init(alloc.gl);
+    const voronoi_buf = try voronoi.makeConeBuf();
+    const background_colors = try makeBackgroundColors(alloc.heap.general(), scratch, db, node_tree);
 
     return .{
         .background_colors = background_colors,
@@ -31,23 +30,19 @@ pub fn init(alloc: Allocator, db: *const Db, node_tree: *const NodeTree) !Backgr
     };
 }
 
-pub fn deinit(self: *BackgroundRenderer, alloc: Allocator) void {
-    self.background_colors.deinit(alloc);
-    self.voronoi_buf.deinit();
-    self.voronoi.deinit();
-}
+pub fn render(
+    self: *BackgroundRenderer, scratch: *ScratchAlloc, positions: Db.ExtraData(Vec2), db: *const Db, node_tree: *const NodeTree, transform: sphmath.Transform3D, dist_thresh_multiplier: f32,) !void {
 
-pub fn render(self: *BackgroundRenderer, tmp_alloc: Allocator, positions: Db.ExtraData(Vec2), db: *const Db, node_tree: *const NodeTree, transform: sphmath.Transform3D, dist_thresh_multiplier: f32,) !void {
-    // FIXME: tmp_alloc is probably an arena, which means this is very wasteful
-    var voronoi_data = std.ArrayList(NodeVoronoi.InstancedRenderBuffer.InstanceData).init(tmp_alloc);
-    defer voronoi_data.deinit();
+    const checkpoint = scratch.checkpoint();
+    defer scratch.restore(checkpoint);
 
-    const dist_thresholds = try calculateDistanceThresholds(tmp_alloc, positions, db, node_tree, dist_thresh_multiplier,);
+    var voronoi_data = std.ArrayList(NodeVoronoi.InstancedRenderBuffer.InstanceData).init(scratch.allocator());
+
+    const dist_thresholds = try calculateDistanceThresholds(scratch.allocator(), positions, db, node_tree, dist_thresh_multiplier,);
 
     var node_it = db.idIter();
     while (node_it.next()) |node_id| {
         var gen = ConeSegmentGenerator{
-            .alloc = tmp_alloc,
             .db = db,
             .center = positions.get(node_id),
             .dist_thresholds = dist_thresholds,
@@ -66,17 +61,16 @@ pub fn render(self: *BackgroundRenderer, tmp_alloc: Allocator, positions: Db.Ext
     try self.voronoi.render(self.voronoi_buf, transform);
 }
 
-fn calculateDistanceThresholds(tmp_alloc: Allocator, positions: Db.ExtraData(Vec2), db: *const Db, node_tree: *const NodeTree, dist_thresh_multiplier: f32,) !Db.ExtraData(f32) {
+fn calculateDistanceThresholds(alloc: Allocator, positions: Db.ExtraData(Vec2), db: *const Db, node_tree: *const NodeTree, dist_thresh_multiplier: f32,) !Db.ExtraData(f32) {
     var calc = try DistThreshCalculator.init(
-        tmp_alloc,
+        alloc,
         positions,
         db,
         node_tree,
         dist_thresh_multiplier,
     );
 
-    var walker = try node_tree.walker(tmp_alloc);
-    defer walker.deinit();
+    var walker = try node_tree.walker(alloc);
 
     while (try walker.next()) |tree_node| {
         try calc.push(tree_node.node, tree_node.level);
@@ -223,7 +217,6 @@ const DistThreshCalculator = struct {
 };
 
 const ConeSegmentGenerator = struct {
-    alloc: Allocator,
     db: *const Db,
     last_radius: f32 = 0.0,
     last_depth: f32 = 0.0,
@@ -290,12 +283,13 @@ fn hsvNormToRgb(h: f32, s: f32, v: f32) sphmath.Vec3 {
     }
 }
 
-fn makeBackgroundColors(alloc: Allocator, db: *const Db, node_tree: *const NodeTree) !Db.ExtraData(sphmath.Vec3) {
-    var background_colors = try db.makeExtraData(sphmath.Vec3, alloc, sphmath.Vec3{ 1.0, 1.0, 1.0 });
-    errdefer background_colors.deinit(alloc);
+fn makeBackgroundColors(gpa: Allocator, scratch: *ScratchAlloc, db: *const Db, node_tree: *const NodeTree) !Db.ExtraData(sphmath.Vec3) {
+    var background_colors = try db.makeExtraData(sphmath.Vec3, gpa, sphmath.Vec3{ 1.0, 1.0, 1.0 });
 
-    var node_walker = try node_tree.walker(alloc);
-    defer node_walker.deinit();
+    const checkpoint = scratch.checkpoint();
+    defer scratch.restore(checkpoint);
+
+    var node_walker = try node_tree.walker(scratch.allocator());
 
     const ColorAllocation = struct {
         initial_min: f32,
@@ -327,8 +321,8 @@ fn makeBackgroundColors(alloc: Allocator, db: *const Db, node_tree: *const NodeT
         }
     };
 
-    var color_allocations = std.ArrayList(ColorAllocation).init(alloc);
-    defer color_allocations.deinit();
+    // FIXME: Arena friendly type
+    var color_allocations = std.ArrayList(ColorAllocation).init(scratch.allocator());
 
     try color_allocations.append(.{
         .initial_min = 0.0,

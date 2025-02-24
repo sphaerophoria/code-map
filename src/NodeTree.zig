@@ -30,8 +30,8 @@ const Item = struct {
 
 const Walker = struct {
     tree: *const NodeTree,
-    alloc: Allocator,
-    stack: std.ArrayListUnmanaged(StackItem),
+    // FIXME: Switch to something arena friendly
+    stack: std.ArrayList(StackItem),
 
     const Output = struct {
         level: usize,
@@ -44,19 +44,14 @@ const Walker = struct {
     };
 
     pub fn init(alloc: Allocator, tree: *const NodeTree, root_list: []const Db.NodeId) !Walker {
-        var stack = std.ArrayListUnmanaged(StackItem){};
-        try stack.append(alloc, .{
+        var stack = std.ArrayList(StackItem).init(alloc);
+        try stack.append(.{
             .child_list = root_list,
         });
         return .{
             .tree = tree,
-            .alloc = alloc,
             .stack = stack,
         };
-    }
-
-    pub fn deinit(self: *Walker) void {
-        self.stack.deinit(self.alloc);
     }
 
     pub fn next(self: *Walker) !?Output {
@@ -83,7 +78,7 @@ const Walker = struct {
 
             if (current_end.child_list.len > current_end.child_idx) {
                 const next_id = current_end.child_list[current_end.child_idx];
-                try self.stack.append(self.alloc, .{
+                try self.stack.append(.{
                     .child_list = self.tree.items.get(next_id).children.items,
                     .child_idx = 0,
                 });
